@@ -1,5 +1,8 @@
 // Branch instruction tests
 // Tests: bne, blt, bltu, bge, bgeu
+// Sadhvi Narayanan
+// sanarayanan@hmc.edu
+// 2/5/2026
 
 .extern return_branch_tests
 .extern fail

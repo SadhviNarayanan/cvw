@@ -1,5 +1,9 @@
 // Upper immediate and jump tests
 // Tests: jalr, lui, auipc
+// Sadhvi Narayanan
+// sanarayanan@hmc.edu
+// 2/5/2026
+
 
 .extern return_upper_tests
 .extern fail

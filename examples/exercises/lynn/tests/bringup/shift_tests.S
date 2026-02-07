@@ -1,5 +1,9 @@
 // Shift instruction tests
 // Tests: sll, slli, srl, srli, sra, srai
+// Sadhvi Narayanan
+// sanarayanan@hmc.edu
+// 2/5/2026
+
 
 .extern return_shift_tests
 .extern fail

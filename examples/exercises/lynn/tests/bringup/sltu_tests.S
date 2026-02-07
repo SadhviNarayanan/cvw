@@ -1,5 +1,9 @@
 // Unsigned comparison tests
 // Tests: sltu, sltiu
+// Sadhvi Narayanan
+// sanarayanan@hmc.edu
+// 2/5/2026
+
 
 .extern return_sltu_tests
 .extern fail

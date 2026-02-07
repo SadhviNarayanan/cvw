@@ -1,5 +1,9 @@
 // Load/Store byte and halfword tests
 // Tests: lb, lbu, lh, lhu, sb, sh
+// Sadhvi Narayanan
+// sanarayanan@hmc.edu
+// 2/5/2026
+
 
 .extern return_loadstore_tests
 .extern fail
