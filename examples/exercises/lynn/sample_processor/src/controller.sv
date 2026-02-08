@@ -10,12 +10,13 @@ module controller(input  logic       funct7b5,
         input  logic [6:0] op,
         output logic [2:0] ResultSrc,
         output logic       MemWrite,
+        output logic       Load,
         output logic       ALUSrc,
         output logic       RegWrite, Jump, Branch,
         output logic       CSRWrite,
         output logic [2:0] ImmSrc,
         output logic [3:0] ALUControl,
-        output  logic [3:0]   WriteByteEn,
+        // output  logic [3:0]   WriteByteEn,
         `ifdef DEBUG
             , input   logic [31:0]  insn_debug
         `endif
@@ -23,12 +24,12 @@ module controller(input  logic       funct7b5,
 
   logic [1:0] ALUOp;
 
-  MainDec md(op, funct7b25, ResultSrc, MemWrite, Branch,
+  MainDec md(op, funct7b25, ResultSrc, MemWrite, Load, Branch,
              ALUSrc, RegWrite, Jump, CSRWrite, ImmSrc, ALUOp);
   aludec  ad(funct7b5, op[5], funct3, ALUOp, ALUControl);
 
   // assign PCSrc = (Branch & take_branch) | Jump;
-  assign WriteByteEn = {(4){MemWrite}}; // currently assigns all 4 bytes to MemWrite
+  // assign WriteByteEn = {(4){MemWrite}}; // currently assigns all 4 bytes to MemWrite
 endmodule
 
 
