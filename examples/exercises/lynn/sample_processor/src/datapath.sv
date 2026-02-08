@@ -6,6 +6,7 @@
 module datapath(input  logic clk, reset,
         input  logic [2:0]  ResultSrc,
         input  logic        MemWrite,
+        input  logic        Load,
         input  logic        ALUSrc,
         input  logic        RegWrite,
         input  logic [2:0]  ImmSrc,
@@ -17,6 +18,7 @@ module datapath(input  logic clk, reset,
         input  logic [31:0] Instr,
         output logic [31:0] ALUResult, WriteData,
         output logic        MemWriteOut,
+        output logic        Load,
         output logic [2:0]  Funct3Out,
         input  logic [31:0] ReadData,
         output logic [31:0] InstrD);
@@ -31,7 +33,7 @@ module datapath(input  logic clk, reset,
   logic [2:0]  funct3D;
   logic [11:0] CSRAddrD;
   // Control signals (from controller - we'll connect these later)
-  logic        RegWriteD, ALUSrcD, MemWriteD, CSRWriteD, BranchD, JumpD;
+  logic        RegWriteD, ALUSrcD, MemWriteD, LoadD,CSRWriteD, BranchD, JumpD;
   logic [2:0]  ResultSrcD, ImmSrcD;
   logic [3:0]  ALUControlD;
 
@@ -44,7 +46,7 @@ module datapath(input  logic clk, reset,
   logic [11:0] CSRAddrE;
   logic        ZeroE, NegativeE, OverflowE, CarryE;
   // Control signals
-  logic        RegWriteE, ALUSrcE, MemWriteE, CSRWriteE, BranchE, JumpE;
+  logic        RegWriteE, ALUSrcE, MemWriteE, LoadE, CSRWriteE, BranchE, JumpE;
   logic [2:0]  ResultSrcE;
   logic [3:0]  ALUControlE;
   logic [1:0]  PCSrcE;
@@ -57,7 +59,7 @@ module datapath(input  logic clk, reset,
   logic [2:0]  funct3M;
   logic [11:0] CSRAddrM;
   // Control signals
-  logic        RegWriteM, MemWriteM, CSRWriteM;
+  logic        RegWriteM, MemWriteM, LoadM, CSRWriteM;
   logic [2:0]  ResultSrcM;
 
   // Writeback Stage
@@ -95,8 +97,19 @@ module datapath(input  logic clk, reset,
 
   // FETCH
   // next PC logic
+  logic [31:0] entry_addr;
+  initial begin
+      // default
+      entry_addr = '0;
+
+      // override if provided
+      void'($value$plusargs("ENTRY_ADDR=%h", entry_addr));
+
+      $display("[TB] ENTRY_ADDR = 0x%h", entry_addr);
+  end
+
   assign InstrF = Instr;
-  flopr_en #(32) pcreg(clk, reset, ~StallF, PCNextF, PCF);
+  flopr_en_reset #(32) pcreg(clk, reset, ~StallF, entry_addr, PCNextF, PCF);
   adder       pcadd4(PCF, 32'd4, PCPlus4F);
   mux3 #(32)  pcmux(PCPlus4F, PCTargetE, {ALUResultE[31:1], 1'b0}, PCSrcE, PCNextF); // need to clear last bit of addrses for jalr
 
@@ -120,6 +133,7 @@ module datapath(input  logic clk, reset,
   assign ImmSrcD = ImmSrc;
   assign ALUSrcD = ALUSrc;
   assign MemWriteD = MemWrite;
+  assign LoadD = Load;
   assign ResultSrcD = ResultSrc;
   assign ALUControlD = ALUControl;
   assign CSRWriteD = CSRWrite;
@@ -156,6 +170,7 @@ module datapath(input  logic clk, reset,
   flopr_en_flush #(1) ID_EX_RegWrite(clk, reset, 1'b1, FlushE, RegWriteD, RegWriteE);
   flopr_en_flush #(1) ID_EX_ALUSrc(clk, reset, 1'b1, FlushE, ALUSrcD, ALUSrcE);
   flopr_en_flush #(1) ID_EX_MemWrite(clk, reset, 1'b1, FlushE, MemWriteD, MemWriteE);
+  flopr_en_flush #(1) ID_EX_Load(clk, reset, 1'b1, FlushE, LoadD, LoadE);
   flopr_en_flush #(1) ID_EX_CSRWrite(clk, reset, 1'b1, FlushE, CSRWriteD, CSRWriteE);
   flopr_en_flush #(1) ID_EX_Branch(clk, reset, 1'b1, FlushE, BranchD, BranchE);
   flopr_en_flush #(1) ID_EX_Jump(clk, reset, 1'b1, FlushE, JumpD, JumpE);
@@ -219,6 +234,7 @@ module datapath(input  logic clk, reset,
 
   // Control signals
   flopr_en #(1) EX_MEM_RegWrite(clk, reset, 1'b1, RegWriteE, RegWriteM);
+  flopr_en #(1) EX_MEM_Load(clk, reset, 1'b1, LoadE, LoadM);
   flopr_en #(1) EX_MEM_MemWrite(clk, reset, 1'b1, MemWriteE, MemWriteM);
   flopr_en #(1) EX_MEM_CSRWrite(clk, reset, 1'b1, CSRWriteE, CSRWriteM);
   flopr_en #(3) EX_MEM_ResultSrc(clk, reset, 1'b1, ResultSrcE, ResultSrcM);
@@ -259,6 +275,7 @@ module datapath(input  logic clk, reset,
   assign ALUResult = ALUResultM;  // For dmem address
   assign WriteData = WriteDataM;  // For dmem write data
   assign MemWriteOut = MemWriteM;  // for dmem
+  assign Load = LoadM
   assign Funct3Out = funct3M;      // for dmem
 endmodule
 
