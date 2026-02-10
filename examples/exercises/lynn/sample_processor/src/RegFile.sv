@@ -2,7 +2,7 @@
 // RISC-V single-cycle processor
 // David_Harris@hmc.edu 2020
 
-module regfile(
+module RegFile(
         input   logic           clk,
         input   logic           WE3,
         input   logic [4:0]     A1, A2, A3,
