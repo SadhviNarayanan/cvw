@@ -15,17 +15,36 @@ module controller(input  logic       funct7b5,
         output logic       RegWrite, Jump, Branch,
         output logic       CSRWrite,
         output logic [2:0] ImmSrc,
-        output logic [3:0] ALUControl,
+        output logic [3:0] ALUControl
         // output  logic [3:0]   WriteByteEn,
         `ifdef DEBUG
-            , input   logic [31:0]  insn_debug
+            input   logic [31:0]  insn_debug
         `endif
         );
 
   logic [1:0] ALUOp;
 
-  MainDec md(op, funct7b25, ResultSrc, MemWrite, Load, Branch,
-             ALUSrc, RegWrite, Jump, CSRWrite, ImmSrc, ALUOp);
+  // Use named connections to avoid width/order errors
+  MainDec md(
+      .op(op),
+      .funct7b25(funct7b25),
+      `ifdef DEBUG
+          .insn_debug(insn_debug),
+      `endif
+      .ResultSrc(ResultSrc),
+      .MemWrite(MemWrite),
+      .Load(Load),
+      .Branch(Branch),
+      .ALUSrc(ALUSrc),
+      .RegWrite(RegWrite),
+      .Jump(Jump),
+      .CSRWrite(CSRWrite),
+      .ImmSrc(ImmSrc),
+      .ALUOp(ALUOp)
+  );
+
+
+
   aludec  ad(funct7b5, op[5], funct3, ALUOp, ALUControl);
 
   // assign PCSrc = (Branch & take_branch) | Jump;

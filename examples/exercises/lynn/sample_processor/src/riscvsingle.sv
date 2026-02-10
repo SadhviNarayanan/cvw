@@ -21,13 +21,25 @@ module riscvsingle(
     output logic [3:0]  WriteByteEn
 );
 
-    // Signals from Memory stage (not decode!)
-    logic [31:0] ALUResultM;     // Address from Memory stage
-    logic [31:0] WriteDataM;     // Write data from Memory stage
-    logic        MemWriteM;      // MemWrite from Memory stage
-    logic        LoadM;          // Load signal from Memory stage
-    logic [2:0]  Funct3M;        // Funct3 from Memory stage
-    logic [31:0] ReadDataAdjusted;
+
+    logic [31:0] InstrD;       // full instruction at Decode stage
+
+    // Control signals
+    logic [2:0] ResultSrc;
+    logic MemWrite, Load, ALUSrc;
+    logic RegWrite, Jump, Branch, CSRWrite;
+    logic [2:0] ImmSrc;
+    logic [3:0] ALUControl;
+
+    // =====================
+    // Signals from Memory stage
+    // =====================
+    logic [31:0] ALUResultM;   // ALU output / address to memory
+    logic [31:0] WriteDataM;   // Data to write to memory
+    logic        MemWriteM;    // MemWrite from memory stage
+    logic        LoadM;        // Load signal from memory stage
+    logic [2:0]  Funct3M;      // Funct3 for memory access
+    logic [31:0] ReadDataAdjusted; // Adjusted load data from memory
 
     assign IEUAdr = ALUResultM;
     assign MemEn = MemWriteM | LoadM;
