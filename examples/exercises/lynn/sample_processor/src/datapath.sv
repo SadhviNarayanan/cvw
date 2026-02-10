@@ -18,7 +18,7 @@ module datapath(input  logic clk, reset,
         input  logic [31:0] Instr,
         output logic [31:0] ALUResult, WriteData,
         output logic        MemWriteOut,
-        output logic        Load,
+        output logic        LoadOut,
         output logic [2:0]  Funct3Out,
         input  logic [31:0] ReadData,
         output logic [31:0] InstrD);
@@ -275,7 +275,7 @@ module datapath(input  logic clk, reset,
   assign ALUResult = ALUResultM;  // For dmem address
   assign WriteData = WriteDataM;  // For dmem write data
   assign MemWriteOut = MemWriteM;  // for dmem
-  assign Load = LoadM
+  assign LoadOut = LoadM;
   assign Funct3Out = funct3M;      // for dmem
 endmodule
 

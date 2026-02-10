@@ -14,5 +14,5 @@ module CsrRegFile(input  logic        clk,
   always_ff @(posedge clk)
     if (WE3) csrRf[A2] <= WD3;
 
-  assign RD1 = csrRf[A1];
+  assign RD1 = (WE3 && (A1 == A2)) ? WD3 : csrRf[A1];
 endmodule
