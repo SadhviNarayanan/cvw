@@ -58,6 +58,7 @@ module datapath(input  logic clk, reset,
   logic [4:0]  RdM;
   logic [2:0]  funct3M;
   logic [11:0] CSRAddrM;
+  logic [31:0] ResultM;
   // Control signals
   logic        RegWriteM, MemWriteM, LoadM, CSRWriteM;
   logic [2:0]  ResultSrcM;
@@ -188,8 +189,8 @@ module datapath(input  logic clk, reset,
   adder       pcaddbranch(PCE, ImmExtE, PCTargetE);
   csrData #(32)  csrData(oldCSRReadDataE, CSRSrcDataE, funct3E, newCSRWriteDataE);
   // ALU logic
-  mux3 #(32)  SrcAmux(RD1E, ResultW, ALUResultM, ForwardAE, SrcAE);
-  mux3 #(32)  SrcBmuxPrev(RD2E, ResultW, ALUResultM, ForwardBE, SrcBEIntermediate);
+  mux3 #(32)  SrcAmux(RD1E, ResultW, ResultM, ForwardAE, SrcAE);
+  mux3 #(32)  SrcBmuxPrev(RD2E, ResultW, ResultM, ForwardBE, SrcBEIntermediate);
   mux2 #(32)  SrcBmux(SrcBEIntermediate, ImmExtE, ALUSrcE, SrcBE);
   alu         ALU(SrcAE, SrcBE, ALUControlE, ALUResultE, ZeroE, NegativeE, OverflowE, CarryE);
   mulDiv      mulDiv(SrcAE, SrcBE, funct3E, MulDivResultE);
@@ -245,6 +246,19 @@ module datapath(input  logic clk, reset,
   assign ReadDataM = ReadData;
   loadUnit #(32) loadUnit(ReadDataM, ALUResultM[1:0], funct3M, AdjustedReadDataM);
 
+  // ADD THIS:
+
+  mux7 #(32) ResultMmux(
+      ALUResultM,        // 000
+      AdjustedReadDataM, // 001
+      PCPlus4M,          // 010
+      ImmExtM,           // 011
+      PCTargetM,         // 100 ← AUIPC result
+      MulDivResultM,     // 101
+      oldCSRReadDataM,   // 110
+      ResultSrcM,
+      ResultM
+  );
 
   // register step Memory --> Writeback (TODO: rename flops)
   // register step Memory --> Writeback

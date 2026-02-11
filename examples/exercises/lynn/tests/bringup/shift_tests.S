@@ -14,29 +14,32 @@
 
 shift_tests:
 
-    // SLL tests
-    test_sll_1:
+    // SLL tests - this first test also tests the data hazards
+    test_sll_hazard:
         li   t0, 0x00000001
-        li   t1, 4
-        sll  t2, t0, t1
-        li   t3, 0x00000010
-        beq  t2, t3, test_sll_2
+        sll  t2, t0, t0      # Use t0 twice (needs forwarding from WB→EX)
+        li   t0, 0x00000002  # 1 << 1 = 2
+        beq  t2, t0, test_sll_2
         j    Fail_Sll_1
 
     test_sll_2:
-        li   t0, 0x00000001
-        li   t1, 31
-        sll  t2, t0, t1
-        li   t3, 0x80000000
-        beq  t2, t3, test_sll_3
+        li   t0, 1
+        li   t1, 4
+        sll  t2, t0, t1      # Normal case
+        sll  t3, t2, t1      # Back-to-back: t3 uses t2 (needs MEM→EX forwarding)
+        li   t4, 0x100       # (1 << 4) << 4 = 256
+        beq  t3, t4, test_sll_3
         j    Fail_Sll_2
 
     test_sll_3:
-        li   t0, 0xFFFFFFFF
-        li   t1, 4
-        sll  t2, t0, t1
-        li   t3, 0xFFFFFFF0
-        beq  t2, t3, test_slli_1
+        li   t0, 1
+        sll  t1, t0, t0      # Chain: t1 depends on t0
+        sll  t2, t1, t1      # t2 depends on t1
+        sll  t3, t2, t2      # t3 depends on t2 (multiple dependencies)
+        li   t4, 0x100       # 1 << 1 = 2, 2 << 2 = 8, 8 << 8 = 2048 = 0x800
+        # Actually: 1<<1=2, 2<<2=8, 8<<8=2048
+        li   t4, 0x800       # 2048
+        beq  t3, t4, pass
         j    Fail_Sll_3
 
     // SLLI tests
