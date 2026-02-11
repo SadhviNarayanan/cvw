@@ -33,11 +33,21 @@ module mulDiv(input  logic [31:0] a, b,
 
 
       3'b100: begin  // DIV
-        result = $signed(a) / $signed(b);
+        if (b == 0) begin
+          result = -1; // Division by zero yields -1
+        end else begin
+          result = $signed(a) / $signed(b);
+        end
+        // result = $signed(a) / $signed(b);
       end
 
       3'b101: begin  // DIVU - unsigned
-        result = a / b;
+        if (b == 0) begin
+          result = -1; // Division by zero yields -1
+        end else begin
+          result = a / b;
+        end
+        // result = a / b;
       end
 
       3'b110: begin  // REM
