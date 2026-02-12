@@ -22,7 +22,7 @@ output logic carry);
       4'b0010: result = a & b;            // AND
       4'b0011: result = a | b;            // OR
       4'b0100: result = a ^ b;            // XOR
-      4'b0101: result = {31'b0, sum[31]}; // SLT (signed)
+      4'b0101: result = {31'b0, $signed(a) < $signed(b)}; // SLT (signed)
       4'b0110: result = {31'b0, a < b};   // SLTU (unsigned)
       4'b0111: result = a << b[4:0];      // SLL (shift left logical)
       4'b1000: result = a >> b[4:0];      // SRL (shift right logical)
