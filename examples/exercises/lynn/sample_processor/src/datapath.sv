@@ -62,6 +62,7 @@ module datapath(input  logic clk, reset,
   // Control signals
   logic        RegWriteM, MemWriteM, LoadM, CSRWriteM;
   logic [2:0]  ResultSrcM;
+  logic [3:0]  ALUControlM;
 
   // Writeback Stage
   logic [31:0] ALUResultW, AdjustedReadDataW, PCPlus4W, PCTargetW, ImmExtW;
@@ -72,6 +73,7 @@ module datapath(input  logic clk, reset,
   // Control signals
   logic        RegWriteW, CSRWriteW;
   logic [2:0]  ResultSrcW;
+  logic [3:0]  ALUControlW;
 
 
     // Hazard Unit signals
@@ -147,9 +149,34 @@ module datapath(input  logic clk, reset,
                  RdW, ResultW, RD1D, RD2D);
   Extend      Ext(InstrD[31:7], ImmSrcD, ImmExtD);
   mux2 #(32)  CSRSrcMux(RD1D, ImmExtD, InstrD[14], CSRSrcDataD); // use top bit of funct3 to decide if imm or srcA is used
-  // TODO: need to make dual ported for a write address coming from writeback stage
-  CsrRegFile  CsrRegFile(clk, CSRWriteW, CSRAddrD, CSRAddrW, newCSRWriteDataW,
-                 oldCSRReadDataD);
+
+  // TODO: the pnly thing i changed from working to now, was commented this out and added the logiv below for csr
+  // CsrRegFile  CsrRegFile(clk, CSRWriteW, CSRAddrD, CSRAddrW, newCSRWriteDataW,
+  //                oldCSRReadDataD);
+
+  // Performance counter increment signals
+  logic IncrementInstret, IncrementAdd, IncrementBranch, IncrementBranchTaken;
+
+  // signals for csr reg stuff, might need to come back to check
+  assign IncrementInstret = RegWriteE & (PCSrcE == 2'b00);                          // From Writeback
+  assign IncrementAdd = (ALUControlW == 4'b0000) && RegWriteW;  // From Writeback
+  assign IncrementBranch = BranchE;                             // From Execute
+  assign IncrementBranchTaken = BranchE && (PCSrcE == 2'b01);   // From Execute
+
+  CsrRegFile CsrRegFile(
+    .clk(clk),
+    .reset(reset),
+    .WE3(CSRWriteW),
+    .A1(CSRAddrD),
+    .A2(CSRAddrW),
+    .WD3(newCSRWriteDataW),
+    .RD1(oldCSRReadDataD),
+    .IncrementCycle(1'b1),
+    .IncrementInstret(IncrementInstret),
+    .IncrementAdd(IncrementAdd),
+    .IncrementBranch(IncrementBranch),
+    .IncrementBranchTaken(IncrementBranchTaken)
+);
 
   // register step Decode --> Execute (TODO: rename flops)
 
@@ -239,6 +266,7 @@ module datapath(input  logic clk, reset,
   flopr_en #(1) EX_MEM_MemWrite(clk, reset, 1'b1, MemWriteE, MemWriteM);
   flopr_en #(1) EX_MEM_CSRWrite(clk, reset, 1'b1, CSRWriteE, CSRWriteM);
   flopr_en #(3) EX_MEM_ResultSrc(clk, reset, 1'b1, ResultSrcE, ResultSrcM);
+  flopr_en #(4) EX_MEM_ALUControl(clk, reset, 1'b1, ALUControlE, ALUControlM);
 
 
 
@@ -278,6 +306,7 @@ module datapath(input  logic clk, reset,
   flopr_en #(1) MEM_WB_RegWrite(clk, reset, 1'b1, RegWriteM, RegWriteW);
   flopr_en #(1) MEM_WB_CSRWrite(clk, reset, 1'b1, CSRWriteM, CSRWriteW);
   flopr_en #(3) MEM_WB_ResultSrc(clk, reset, 1'b1, ResultSrcM, ResultSrcW);
+  flopr_en #(4) MEM_WB_ALUControl(clk, reset, 1'b1, ALUControlM, ALUControlW);
 
 
   // WRITEBACK
