@@ -23,8 +23,14 @@ module datapath(input  logic clk, reset,
         input  logic [31:0] ReadData,
         output logic [31:0] InstrD);
 
+  // Branch Prediction
+  logic [7:0] GHR;  // Global History Register (8 bits)
+  logic [1:0] PHT [255:0];  // Pattern History Table (256 x 2-bit counters)
+
   // Fetch Stage
   logic [31:0] PCF, InstrF, PCPlus4F, PCNextF;
+  logic        isBranchF;
+  logic        PredictedTakenF; // if its 10 or 11 then its taken, so essentially we only care about bit 1 to check if taken or not, but 0 is just for certainty
 
   // Decode Stage
   logic [31:0] PCD, PCPlus4D; // InstrD --> output
@@ -32,6 +38,7 @@ module datapath(input  logic clk, reset,
   logic [4:0]  Rs1D, Rs2D, RdD;
   logic [2:0]  funct3D;
   logic [11:0] CSRAddrD;
+  logic        PredictedTakenD;
   // Control signals (from controller - we'll connect these later)
   logic        RegWriteD, ALUSrcD, MemWriteD, LoadD,CSRWriteD, BranchD, JumpD;
   logic [2:0]  ResultSrcD, ImmSrcD;
@@ -45,6 +52,7 @@ module datapath(input  logic clk, reset,
   logic [2:0]  funct3E;
   logic [11:0] CSRAddrE;
   logic        ZeroE, NegativeE, OverflowE, CarryE;
+  logic        BranchTakenE, PredictedTakenE, BranchMispredictE;
   // Control signals
   logic        RegWriteE, ALUSrcE, MemWriteE, LoadE, CSRWriteE, BranchE, JumpE;
   logic [2:0]  ResultSrcE;
@@ -114,14 +122,41 @@ module datapath(input  logic clk, reset,
   assign InstrF = Instr;
   flopr_en_reset #(32) pcreg(clk, reset, ~StallF, entry_addr, PCNextF, PCF);
   adder       pcadd4(PCF, 32'd4, PCPlus4F);
-  mux3 #(32)  pcmux(PCPlus4F, PCTargetE, {ALUResultE[31:1], 1'b0}, PCSrcE, PCNextF); // need to clear last bit of addrses for jalr
 
+  // ADDING BRANCH PREDICTION LOGIC - TODO: check
+  logic [31:0] BranchTargetPred, TargetPCBranch;
+  logic [7:0] BranchIndex;
+
+  assign isBranchF = (InstrF[6:0] == 7'b1100011);
+  assign BranchTargetPred = {{20{InstrF[31]}}, InstrF[7], InstrF[30:25], InstrF[11:8], 1'b0};
+  assign BranchIndex = PCF[9:2] ^ GHR;
+  assign PredictedTakenF = PHT[BranchIndex][1]; // again, only care about bit 1 for taken, bit 0 - certainty
+  // assign TargetPCBranch = PCF + BranchTargetPred;
+
+  // PC selection with priority
+  logic [1:0] PCSelect;
+  always_comb begin
+    TargetPCBranch = PCF + BranchTargetPred;
+    if (PCSrcE != 2'b00) begin// this means that we have calcualted we need to branch from execute, so this takes priority bc we went down wrong path essentially, we shdl not be continutin down this path if execxute says we need to branch (this means we did not predict correctly and execute stage caught us)
+        if (PCSrcE == 2'b11) begin // if PCSrcE is 11, this means we mispredicted and said take branch, but it should have been no, so we need to go back to PCE + 4 instead of PCTargetE. // if PCSrcE is 11, this means we mispredicted and said take branch, but it should have been no, so we need to go back to PCE + 4 instead of PCTargetE. (Hazard unit will take care of flush if PCSrcE != 0)
+          TargetPCBranch = PCPlus4E;
+        end
+          PCSelect = PCSrcE;          // Execute overrides (misprediction recovery, jumps)
+    end else if (isBranchF && PredictedTakenF)
+          PCSelect = 2'b11;           // Predicted taken
+      else
+          PCSelect = 2'b00;           // Normal PC+4 --> same this --> PCSrcE or 2'b00
+  end
+
+  mux4 #(32)  pcmux(PCPlus4F, PCTargetE, {ALUResultE[31:1], 1'b0}, TargetPCBranch, PCSelect, PCNextF); // need to clear last bit of addrses for jalr
+  // mux3 #(32)  pcmux(PCPlus4F, PCTargetE, {ALUResultE[31:1], 1'b0}, PCSrcE, PCNextF);
 
   // register Fetch --> Decode
   // if stall = 0 (we dont stall), enable the flops to load next values
   flopr_en_flush #(32) IF_ID_PC(clk, reset, ~StallD, FlushD, PCF, PCD);
   flopr_en_flush #(32) IF_ID_PCPlus4(clk, reset, ~StallD, FlushD, PCPlus4F, PCPlus4D);
   flopr_en_flush #(32) IF_ID_Instr(clk, reset, ~StallD, FlushD, InstrF, InstrD);
+  flopr_en_flush #(1) IF_ID_BranchPred(clk, reset, ~StallD, FlushD, PredictedTakenF, PredictedTakenD);
 
 
   // DECODE
@@ -193,6 +228,7 @@ module datapath(input  logic clk, reset,
   flopr_en_flush #(32) ID_EX_PCPlus4(clk, reset, 1'b1, FlushE, PCPlus4D, PCPlus4E);
   flopr_en_flush #(32) ID_EX_oldCSRReadData(clk, reset, 1'b1, FlushE, oldCSRReadDataD, oldCSRReadDataE);
   flopr_en_flush #(32) ID_EX_CSRSrcData(clk, reset, 1'b1, FlushE, CSRSrcDataD, CSRSrcDataE);
+  flopr_en_flush #(1)  ID_EX_BranchPred(clk, reset, 1'b1, FlushE, PredictedTakenD, PredictedTakenE);
 
   // Control signals
   flopr_en_flush #(1) ID_EX_RegWrite(clk, reset, 1'b1, FlushE, RegWriteD, RegWriteE);
@@ -234,16 +270,39 @@ module datapath(input  logic clk, reset,
     endcase
   end
 
+  assign BranchTakenE = BranchE & take_branchE;
+  assign BranchMispredictE = BranchE && (PredictedTakenE != BranchTakenE);
+
+  logic [7:0] indexE;
+
   always_comb begin
-    if (BranchE & take_branchE) PCSrcE = 2'b01;
+    if (BranchMispredictE & BranchTakenE) PCSrcE = 2'b01; // only branch and let fetech stage know if it was a mispredicton, othwewise we woudl have already taken the correct branch if we predicted correctly
+    else if (BranchMispredictE & ~BranchTakenE) PCSrcE = 2'b11; // if we predicted take branch, but it it actually not take, then we need to jump to original PCE+4, and flush (Hazard unit will take care of this if PCSrcE != 00)
     else if (JumpE) begin
       if (~ALUSrcE) PCSrcE = 2'b01; // jal changed if from op == 7'b1101111
-      else PCSrcE = 2'b10; // jalr
+      else                  PCSrcE = 2'b10; // jalr
     end else begin
       PCSrcE = 2'b00;
     end
   end
 
+  // update GHR with new branch status, check if matched prediction, update table
+
+  // update GHR
+  flopr_en #(8) EX_MEM_GHRUpdate(clk, reset, BranchE, {GHR[6:0],BranchTakenE}, GHR); // GHR will reflect new value in memory stage
+  // update PHT
+  assign indexE = PCE[9:2] ^ GHR;
+  always_ff @(posedge clk) begin
+    if (reset) begin
+        // Initialize on reset
+        for (int i = 0; i < 256; i++)
+            PHT[i] <= 2'b01;
+    end else if (BranchE & !BranchTakenE) begin
+      if (PHT[indexE] != 2'b00) PHT[indexE] <= PHT[indexE] - 1;
+    end else if (BranchE & BranchTakenE) begin
+      if (PHT[indexE] != 2'b11) PHT[indexE] <= PHT[indexE] + 1;
+    end
+  end
 
   // register step Execute --> Memory (TODO: rename flops)
 
