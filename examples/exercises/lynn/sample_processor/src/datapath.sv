@@ -334,16 +334,24 @@ module datapath(input  logic clk, reset,
    .WD3(newCSRWriteDataW),
    .RD1(oldCSRReadDataM),
    .IncrementCycle(1'b1),
-   .IncrementInstret(IncrementInstret),
-   .IncrementAdd(IncrementAdd),
-   .IncrementBranch(IncrementBranch),
-   .IncrementBranchTaken(IncrementBranchTaken),
-   .IncrementJumps(IncrementJumps),
-   .IncrementLoads(IncrementLoads),
-   .IncrementStores(IncrementStores),
-   .IncrementStalls(IncrementStalls),
-   .IncrementFlushes(IncrementFlushes)
+   .IncrementInstret(0),
+   .IncrementAdd(0),
+   .IncrementBranch(0),
+   .IncrementBranchTaken(0),
+
+  .IncrementJumps(IncrementJumps),        // ✓
+  .IncrementLoads(IncrementLoads),        // ✓
+  .IncrementStores(IncrementStores),      // ✓
+  .IncrementStalls(IncrementStalls),      // ✓
+  .IncrementFlushes(IncrementFlushes)     // ✓
  );
+  // always_comb begin
+  // if (IncrementAdd) begin
+  //              $display("CSR: IncrementLoads=%b, IncrementStores=%b, IncrementJumps=%b, IncrementStalls=%b, IncrementFlushes=%b",
+  //                IncrementLoads, IncrementStores, IncrementJumps, IncrementStalls, IncrementFlushes);
+  //           end
+  // end
+
 
   // because we are reading on the same cycle, timing should be fine for oldCSRReadDataM
   // CSRSrcDataM is the immediate value for csr instructions from execute

@@ -47,33 +47,39 @@ module CsrRegFile(
            hpmcounter10 <= 0;
        end else begin
            // Always increment cycle and time
+            // $display("CSR: IncrementLoads=%b, IncrementStores=%b, IncrementJumps=%b, IncrementStalls=%b, IncrementFlushes=%b",
+            //       IncrementBranchTaken, IncrementStores, IncrementJumps, IncrementStalls, IncrementFlushes);
+
            cycle <= cycle + 1;
            time_counter <= time_counter + 1;
 
 
            // Increment instret when instruction retires (completes WB)
-           if (IncrementInstret) begin
+           if (IncrementInstret == 1) begin
                instret <= instret + 1;
            end
 
 
             // HPM counters
-            if (IncrementAdd)
+            if (IncrementAdd == 1) begin
                hpmcounter3 <= hpmcounter3 + 1;
+            //    $display("CSR: IncrementLoads=%b, IncrementStores=%b, IncrementJumps=%b, IncrementStalls=%b, IncrementFlushes=%b",
+            //      IncrementLoads, IncrementStores, IncrementJumps, IncrementStalls, IncrementFlushes);
+            end
 
-            if (IncrementBranch)
+            if (IncrementBranch == 1)
                hpmcounter4 <= hpmcounter4 + 1;
 
-            if (IncrementBranchTaken)
+            if (IncrementBranchTaken == 1)
                hpmcounter5 <= hpmcounter5 + 1;
 
-            if (IncrementJumps)
+            if (IncrementLoads)
                 hpmcounter6 <= hpmcounter6 + 1;
 
-            if (IncrementLoads)
+            if (IncrementStores)
                 hpmcounter7 <= hpmcounter7 + 1;
 
-            if (IncrementStores)
+            if (IncrementJumps)
                 hpmcounter8 <= hpmcounter8 + 1;
 
             if (IncrementStalls)
@@ -145,29 +151,3 @@ module CsrRegFile(
 
 
 endmodule
-
-
-
-
-// module CsrRegFile(input  logic        clk,
-//                input  logic        WE3,
-//                input  logic [11:0] A1,
-//                input  logic [11:0] A2,
-//                input  logic [31:0] WD3,
-//                output logic [31:0] RD1);
-
-
-//   logic [31:0] csrRf[4095:0] = '{default: 32'h0};
-
-
-//   // singlle ported register file
-//   // read/write same input port combinationally
-//   // register 0 hardwired to 0
-
-
-//   always_ff @(posedge clk)
-//     if (WE3) csrRf[A2] <= WD3;
-
-
-//   assign RD1 = (WE3 && (A1 == A2)) ? WD3 : csrRf[A1];
-// endmodule
