@@ -157,7 +157,7 @@ void _init(int cid, int nc)
   ee_printf("Branches Taken (hpm5) %ld\n",        counters[4]);
 
   // Implementation-defined (your choice):
-  ee_printf("Jumps done (hpm6) %ld\n",      counters[5]);
+  ee_printf("Branch Mispredictions (hpm6) %ld\n",      counters[5]);
   ee_printf("Loads done (hpm7) %ld\n",      counters[6]);
   ee_printf("Stores done (hpm8) %ld\n",      counters[7]);
   ee_printf("Stalls taken (hpm9) %ld\n",      counters[8]);

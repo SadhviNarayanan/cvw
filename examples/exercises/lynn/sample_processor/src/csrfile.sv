@@ -1,4 +1,4 @@
-module CsrRegFile(
+module csrfile(
    input  logic        clk, reset,
    input  logic        WE3,
    input  logic [11:0] A1,
@@ -11,7 +11,7 @@ module CsrRegFile(
    input  logic        IncrementAdd,
    input  logic        IncrementBranch,
    input  logic        IncrementBranchTaken,
-   input  logic        IncrementJumps,
+   input  logic        BranchMisPrediction,
    input  logic        IncrementLoads,
    input  logic        IncrementStores,
    input  logic        IncrementStalls,
@@ -55,31 +55,31 @@ module CsrRegFile(
 
 
            // Increment instret when instruction retires (completes WB)
-           if (IncrementInstret == 1) begin
+           if (IncrementInstret) begin
                instret <= instret + 1;
            end
 
 
             // HPM counters
-            if (IncrementAdd == 1) begin
+            if (IncrementAdd) begin
                hpmcounter3 <= hpmcounter3 + 1;
             //    $display("CSR: IncrementLoads=%b, IncrementStores=%b, IncrementJumps=%b, IncrementStalls=%b, IncrementFlushes=%b",
             //      IncrementLoads, IncrementStores, IncrementJumps, IncrementStalls, IncrementFlushes);
             end
 
-            if (IncrementBranch == 1)
+            if (IncrementBranch)
                hpmcounter4 <= hpmcounter4 + 1;
 
-            if (IncrementBranchTaken == 1)
+            if (IncrementBranchTaken)
                hpmcounter5 <= hpmcounter5 + 1;
 
-            if (IncrementLoads)
+            if (BranchMisPrediction)
                 hpmcounter6 <= hpmcounter6 + 1;
 
-            if (IncrementStores)
+            if (IncrementLoads)
                 hpmcounter7 <= hpmcounter7 + 1;
 
-            if (IncrementJumps)
+            if (IncrementStores)
                 hpmcounter8 <= hpmcounter8 + 1;
 
             if (IncrementStalls)

@@ -312,20 +312,21 @@ module datapath(input  logic clk, reset,
 
   // Performance counter increment signals
   logic IncrementInstret, IncrementAdd, IncrementBranch, IncrementBranchTaken;
-  logic IncrementJumps, IncrementLoads, IncrementStores, IncrementStalls, IncrementFlushes;
+  logic IncrementJumps, IncrementLoads, IncrementStores, IncrementStalls, IncrementFlushes, BranchMisPrediction;
 
   // signals for csr reg stuff, might need to come back to check
   assign IncrementInstret = RegWriteM || MemWriteM || LoadM;                          // From Writeback
   assign IncrementAdd = (ALUControlW == 4'b0000) && RegWriteW;  // From Writeback
   assign IncrementBranch = BranchE;                             // From Execute
   assign IncrementBranchTaken = BranchE && (PCSrcE == 2'b01);   // From Execute
+  assign BranchMisPrediction = BranchMispredictE;
   assign IncrementJumps = JumpE;                             // From Execute
   assign IncrementLoads = LoadM;                                   // From Memory
   assign IncrementStores = MemWriteM;                                // From Memory
   assign IncrementStalls = StallD;                            // From Hazard Unit
   assign IncrementFlushes = FlushE;                          // From Hazard Unit
 
-  CsrRegFile CsrRegFile(
+  csrfile file(
    .clk(clk),
    .reset(reset),
    .WE3(CSRWriteW),
@@ -334,12 +335,12 @@ module datapath(input  logic clk, reset,
    .WD3(newCSRWriteDataW),
    .RD1(oldCSRReadDataM),
    .IncrementCycle(1'b1),
-   .IncrementInstret(0),
-   .IncrementAdd(0),
-   .IncrementBranch(0),
-   .IncrementBranchTaken(0),
+   .IncrementInstret(IncrementInstret),
+   .IncrementAdd(IncrementAdd),
+   .IncrementBranch(IncrementBranch),
+   .IncrementBranchTaken(IncrementBranchTaken),
 
-  .IncrementJumps(IncrementJumps),        // ✓
+  .BranchMisPrediction(BranchMisPrediction),        // ✓
   .IncrementLoads(IncrementLoads),        // ✓
   .IncrementStores(IncrementStores),      // ✓
   .IncrementStalls(IncrementStalls),      // ✓
