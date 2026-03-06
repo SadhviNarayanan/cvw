@@ -1,10 +1,10 @@
 module alu(input  logic [31:0] a, b,
 input  logic [3:0]  alucontrol,
-output logic [31:0] result,
-output logic zero,
-output logic negative,
-output logic overflow,
-output logic carry);
+output logic [31:0] result);
+// output logic zero,
+// output logic negative,
+// output logic overflow,
+// output logic carry);
 
   logic [31:0] condinvb, sum;
   logic [32:0] sum_extend;
@@ -30,9 +30,9 @@ output logic carry);
       default: result = 0;
     endcase
 
-  assign zero = (result == 32'b0);
-  assign negative = (result[31] == 1);
-  assign overflow = (a[31] == condinvb[31]) && (sum[31] != a[31]);
-  assign carry = (sum_extend[32] == 1);
+  // assign zero = (result == 32'b0);
+  // assign negative = (result[31] == 1);
+  // assign overflow = (a[31] == condinvb[31]) && (sum[31] != a[31]);
+  // assign carry = (sum_extend[32] == 1);
 
 endmodule
