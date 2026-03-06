@@ -1,4 +1,4 @@
-// This comparator is best
+// This comparator is best - adapated it from wally
 module comparator #(parameter WIDTH=32) (
   input  logic [WIDTH-1:0] a, b,    // Operands
   output logic [2:0]       flags);  // Output flags: {eq, lt}
