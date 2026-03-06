@@ -119,6 +119,7 @@ module datapath(input  logic clk, reset,
    // FlushD: compute directly from PCSrcE (already in this module) to avoid
    // the routing round-trip PCSrcE→HazardUnit→FlushD_exe→here (~0.1ns saved).
    // FlushD_exe from HazardUnit is kept connected but unused here.
+   // need this bc now we could flush in decode stage.
    logic FlushD;
    logic isBranchD;
    assign FlushD = (PCSrcE != 2'b00) | (isBranchD & PredictedTakenD & ~StallD);
