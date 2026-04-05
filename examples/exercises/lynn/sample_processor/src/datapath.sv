@@ -53,7 +53,7 @@ logic        JALPredictE;      // pipelined to execute for mispredict check
 // Execute Stage
 logic [31:0] RD1E, RD2E, PCE, PCPlus4E, ImmExtE;
 logic [31:0] CSRSrcDataE;
-logic [31:0] SrcAE, SrcBE, SrcBEIntermediate, ALUResultE, WriteDataE, PCTargetE;
+logic [31:0] SrcAE, SrcBE, SrcBEIntermediate, ALUResultE, WriteDataE, PCTargetE, MulDivResultE;
 logic [4:0]  Rs1E, Rs2E, RdE;
 logic [2:0]  funct3E;
 logic [11:0] CSRAddrE;
@@ -66,7 +66,7 @@ logic [1:0]  PCSrcE;
 
 
 // Memory Stage
-logic [31:0] ALUResultM, WriteDataM, PCPlus4M;
+logic [31:0] ALUResultM, WriteDataM, PCPlus4M, MulDivResultM;
 logic [31:0] oldCSRReadDataM, newCSRWriteDataM, CSRSrcDataM;
 logic [31:0] ReadDataM;
 logic [4:0]  RdM;
@@ -79,7 +79,7 @@ logic [3:0]  ALUControlM;
 
 
 // Writeback Stage
-logic [31:0] ALUResultW, AdjustedReadDataW, PCPlus4W;
+logic [31:0] ALUResultW, AdjustedReadDataW, PCPlus4W, MulDivResultW;
 logic [31:0] oldCSRReadDataW, newCSRWriteDataW;
 logic [31:0] ReadDataW;
 logic [31:0] ResultW;
@@ -255,10 +255,11 @@ assign WriteDataE = SrcBEIntermediate;
 logic take_branchE;
 
 adder      pcaddbranch(PCE, ImmExtE, PCTargetE);
-mux3 #(32) SrcAmux(RD1E, ResultW, ALUResultM, ForwardAE, SrcAE);
-mux3 #(32) SrcBmuxPrev(RD2E, ResultW, ALUResultM, ForwardBE, SrcBEIntermediate);
+mux3 #(32) SrcAmux(RD1E, ResultW, ResultM, ForwardAE, SrcAE);
+mux3 #(32) SrcBmuxPrev(RD2E, ResultW, ResultM, ForwardBE, SrcBEIntermediate);
 mux2 #(32) SrcBmux(SrcBEIntermediate, ImmExtE, ALUSrcE, SrcBE);
 alu        ALU(SrcAE, SrcBE, ALUControlE, ALUResultE);
+mulDiv     mulDiv(SrcAE, SrcBE, funct3E, MulDivResultE);
 
 logic eq_E, lt_signed_E, lt_unsig_E;
 comparator comparator(SrcAE, SrcBE, {eq_E, lt_signed_E, lt_unsig_E});
@@ -337,6 +338,7 @@ end
 // Execute → Memory pipeline registers
 flopr_en #(32) EX_MEM_PCPlus4(clk, reset, 1'b1, PCPlus4E, PCPlus4M);
 flopr_en #(32) EX_MEM_ALUResult(clk, reset, 1'b1, ALUResultPipeE, ALUResultM);
+flopr_en #(32) EX_MEM_MulDivResult(clk, reset, 1'b1, MulDivResultE, MulDivResultM);
 flopr_en #(32) EX_MEM_WriteData(clk, reset, 1'b1, WriteDataE, WriteDataM);
 flopr_en #(5)  EX_MEM_Rd(clk, reset, 1'b1, RdE, RdM);
 flopr_en #(3)  EX_MEM_funct3(clk, reset, 1'b1, funct3E, funct3M);
@@ -389,10 +391,26 @@ csrfile csrfile(
 
 csrData #(32) csrData(oldCSRReadDataM, CSRSrcDataM, funct3M, newCSRWriteDataM);
 
+// ADD THIS:
+logic [31:0] ResultM_Forward;  // For forwarding only
+mux7 #(32) ResultMmux(
+   ALUResultM,  // 000
+   ReadDataM,   // 001 raw load data for M-stage forwarding (load-use stall means consumer is never in EX when load is in M, so raw value is safe)
+   PCPlus4M,    // 010
+   ALUResultM,  // 011 LUI: folded into ALUResult at E/M boundary
+   ALUResultM,  // 100 AUIPC: folded into ALUResult at E/M boundary
+   MulDivResultM, // 101
+   32'b0, // 110
+   ResultSrcM,
+   ResultM
+);
+
+
 
 // Memory → Writeback pipeline registers
 flopr_en #(32) MEM_WB_PCPlus4(clk, reset, 1'b1, PCPlus4M, PCPlus4W);
 flopr_en #(32) MEM_WB_ALUResult(clk, reset, 1'b1, ALUResultM, ALUResultW);
+flopr_en #(32) MEM_WB_MulDivResult(clk, reset, 1'b1, MulDivResultM, MulDivResultW);
 flopr_en #(32) MEM_WB_oldCSRReadData(clk, reset, 1'b1, oldCSRReadDataM, oldCSRReadDataW);
 flopr_en #(32) MEM_WB_newCSRWriteData(clk, reset, 1'b1, newCSRWriteDataM, newCSRWriteDataW);
 flopr_en #(32) MEM_WB_ReadData(clk, reset, 1'b1, ReadDataM, ReadDataW);
@@ -407,7 +425,7 @@ flopr_en #(3) MEM_WB_ResultSrc(clk, reset, 1'b1, ResultSrcM, ResultSrcW);
 
 // WRITEBACK
 loadUnit #(32) loadUnit(ReadDataW, ALUResultW[1:0], funct3W, AdjustedReadDataW);
-mux7 #(32) Resultmux(ALUResultW, AdjustedReadDataW, PCPlus4W, ALUResultW, ALUResultW, ALUResultW, oldCSRReadDataW, ResultSrcW, ResultW);
+mux7 #(32) Resultmux(ALUResultW, AdjustedReadDataW, PCPlus4W, ALUResultW, ALUResultW, MulDivResultW, oldCSRReadDataW, ResultSrcW, ResultW);
 
 assign PC         = PCF;
 assign ALUResult  = ALUResultM;

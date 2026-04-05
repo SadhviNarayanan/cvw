@@ -60,6 +60,10 @@ module testbench;
     if (~reset) begin
 
       //$display("PC: %h \t Instr: %h", PC, Instr);
+      // $display("\n PCF: %h \t PCD: %h \t PCE: %h",
+      //           dut.dp.PCF,
+      //            dut.dp.PCD,
+      //            dut.dp.PCE);
 
       // $display("MemEn: %b",
       //         MemEn
