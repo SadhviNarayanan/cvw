@@ -29,7 +29,7 @@ module csrfile(
   logic [31:0] hpmcounter6;
 //   logic [63:0] hpmcounter7;
 //   logic [63:0] hpmcounter8;
-  logic [31:0] hpmcounter9;
+  //logic [31:0] hpmcounter9;
   logic [31:0] hpmcounter10;
 
 
@@ -47,7 +47,7 @@ module csrfile(
           hpmcounter6 <= 0;
         //   hpmcounter7 <= 0;
         //   hpmcounter8 <= 0;
-          hpmcounter9 <= 0;
+          //hpmcounter9 <= 0;
           hpmcounter10 <= 0;
       end else begin
           // Always increment cycle and time
@@ -97,8 +97,8 @@ module csrfile(
         //        hpmcounter8 <= hpmcounter8 + 1;
 
 
-           if (IncrementStalls)
-               hpmcounter9 <= hpmcounter9 + 1;
+          //  if (IncrementStalls)
+          //      hpmcounter9 <= hpmcounter9 + 1;
 
 
            if (IncrementFlushes)
@@ -157,7 +157,7 @@ module csrfile(
           12'hC06: RD1 = hpmcounter6[31:0];   // todo
         //   12'hC07: RD1 = hpmcounter7[31:0];   // todo
         //   12'hC08: RD1 = hpmcounter8[31:0];   // todo
-          12'hC09: RD1 = hpmcounter9[31:0];   // todo
+          //12'hC09: RD1 = hpmcounter9[31:0];   // todo
           12'hC0A: RD1 = hpmcounter10[31:0];  // todo
 
 
