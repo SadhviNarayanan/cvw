@@ -242,6 +242,7 @@ module datapath(
    logic [2:0]  ResultSrcM_I0;
    logic [31:0] oldCSRReadDataM_I0, newCSRWriteDataM_I0;
    logic [31:0] ResultM_I0;
+   logic [33:0] P0_M_I0, P1_M_I0, P2_M_I0, P3_M_I0; // pipelined mul results for I0 (for forwarding and writeback)
 
 
    // ------------------------------------------------------------
@@ -257,6 +258,9 @@ module datapath(
    logic        RegWriteM_I1, MemWriteM_I1, CSRWriteM_I1, LoadM_I1;
    logic [2:0]  ResultSrcM_I1;
    logic [31:0] ResultM_I1;
+   logic [33:0] P0_M_I1, P1_M_I1, P2_M_I1, P3_M_I1; // pipelined mul results for I1 (for forwarding and writeback)
+
+
 
 
    // Memory arbitration
@@ -268,7 +272,7 @@ module datapath(
    // Writeback Stage — I0
    // ------------------------------------------------------------
    logic [31:0] PCPlus4W_I0;
-   logic [31:0] ALUResultW_I0;
+   logic [31:0] ALUResultW_I0, productW_I0;
    logic [31:0] oldCSRReadDataW_I0, newCSRWriteDataW_I0;
    logic [31:0] ReadDataW_I0;
    logic [31:0] ALUResultForAddrW_I0;
@@ -284,7 +288,7 @@ module datapath(
    // Writeback Stage — I1
    // ------------------------------------------------------------
    logic [31:0] PCPlus4W_I1;
-   logic [31:0] ALUResultW_I1;
+   logic [31:0] ALUResultW_I1, productW_I1;
    logic [31:0] ReadDataW_I1;
    logic [31:0] ALUResultForAddrW_I1;
    logic [2:0]  funct3W_I1;
@@ -757,6 +761,9 @@ module datapath(
    alu        ALU_I0        (SrcAE_I0, SrcBE_I0, ALUControlE_I0[3:0], ALUResultE_I0);
    comparator comp_I0       (SrcAE_I0, SrcBE_I0, {eq_E_I0, lt_signed_E_I0, lt_unsig_E_I0});
 
+   logic [33:0] P0_0, P1_0, P2_0, P3_0;
+   mulDiv mulDiv_I0(SrcAE_I0, SrcBE_I0, funct3E_I0, P0_0, P1_0, P2_0, P3_0);
+
 
    always_comb begin
        case (ResultSrcE_I0)
@@ -816,6 +823,9 @@ module datapath(
 
    alu        ALU_I1        (SrcAE_I1, SrcBE_I1, ALUControlE_I1[3:0], ALUResultE_I1);
    comparator comp_I1       (SrcAE_I1, SrcBE_I1, {eq_E_I1, lt_signed_E_I1, lt_unsig_E_I1});
+
+   logic [33:0] P0_1, P1_1, P2_1, P3_1;
+   mulDiv mulDiv_I1(SrcAE_I1, SrcBE_I1, funct3E_I1, P0_1, P1_1, P2_1, P3_1);
 
 
    always_comb begin
@@ -904,6 +914,10 @@ module datapath(
    // I0
    flopr_en #(32) EX_MEM_PCPlus4_I0  (clk, reset, 1'b1, PCPlus4E_I0,       PCPlus4M_I0);
    flopr_en #(32) EX_MEM_ALUResult_I0 (clk, reset, 1'b1, ALUResultPipeE_I0, ALUResultM_I0);
+   flopr_en #(34) EX_MEM_Mul_I0_P0(clk, reset, 1'b1, P0_0, P0_M_I0);
+   flopr_en #(34) EX_MEM_Mul_I0_P1(clk, reset, 1'b1, P1_0, P1_M_I0);
+   flopr_en #(34) EX_MEM_Mul_I0_P2(clk, reset, 1'b1, P2_0, P2_M_I0);
+   flopr_en #(34) EX_MEM_Mul_I0_P3(clk, reset, 1'b1, P3_0, P3_M_I0);
    flopr_en #(32) EX_MEM_WriteData_I0 (clk, reset, 1'b1, WriteDataE_I0,     WriteDataM_I0);
    flopr_en #(5)  EX_MEM_Rd_I0        (clk, reset, 1'b1, RdE_I0,            RdM_I0);
    flopr_en #(3)  EX_MEM_funct3_I0    (clk, reset, 1'b1, funct3E_I0,        funct3M_I0);
@@ -920,6 +934,10 @@ module datapath(
    // I1 TODO: check if flush logic is correct
    flopr_en_flush #(32) EX_MEM_PCPlus4_I1  (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), PCPlus4E_I1,       PCPlus4M_I1);
    flopr_en_flush #(32) EX_MEM_ALUResult_I1 (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), ALUResultPipeE_I1, ALUResultM_I1);
+   flopr_en_flush #(34) EX_MEM_Mul_I1_P0(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P0_1, P0_M_I1);
+   flopr_en_flush #(34) EX_MEM_Mul_I1_P1(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P1_1, P1_M_I1);
+   flopr_en_flush #(34) EX_MEM_Mul_I1_P2(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P2_1, P2_M_I1);
+   flopr_en_flush #(34) EX_MEM_Mul_I1_P3(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P3_1, P3_M_I1);
    flopr_en_flush #(32) EX_MEM_WriteData_I1 (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), WriteDataE_I1,     WriteDataM_I1);
    flopr_en_flush #(5)  EX_MEM_Rd_I1        (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), RdE_I1,            RdM_I1);
    flopr_en_flush #(3)  EX_MEM_funct3_I1    (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), funct3E_I1,        funct3M_I1);
@@ -990,6 +1008,41 @@ module datapath(
                              funct3M_I0, newCSRWriteDataM_I0);
 
 
+    logic [63:0] origProductM_0;
+    logic [31:0] productM_0;
+     // assign origProduct = (P0 << 32) + (P1 << 16) + (P2 << 16) + P3;
+    assign origProductM_0 = ({{32{P0_M_I0[33]}}, P0_M_I0} << 32) +
+                        ({{32{P1_M_I0[33]}}, P1_M_I0} << 16) +
+                        ({{32{P2_M_I0[33]}}, P2_M_I0} << 16) +
+                        {{32{P3_M_I0[33]}}, P3_M_I0};
+    always_comb begin
+        case (funct3M_I0)
+            3'b000: productM_0 = origProductM_0[31:0]; // MUL {$signed(SrcAE) * $signed(SrcBE)}[31:0];
+            default:  // MULH, MULHU, MULHSU
+                begin
+                    productM_0 = origProductM_0[63:32]; // productE = ($signed(SrcAE) * $signed(SrcBE)) >>> 32; // origProduct[63:32];
+                end
+        endcase
+    end
+
+    logic [63:0] origProductM_1;
+    logic [31:0] productM_1;
+     // assign origProduct = (P0 << 32) + (P1 << 16) + (P2 << 16) + P3;
+    assign origProductM_1 = ({{32{P0_M_I1[33]}}, P0_M_I1} << 32) +
+                        ({{32{P1_M_I1[33]}}, P1_M_I1} << 16) +
+                        ({{32{P2_M_I1[33]}}, P2_M_I1} << 16) +
+                        {{32{P3_M_I1[33]}}, P3_M_I1};
+    always_comb begin
+        case (funct3M_I1)
+            3'b000: productM_1 = origProductM_1[31:0]; // MUL {$signed(SrcAE) * $signed(SrcBE)}[31:0];
+            default:  // MULH, MULHU, MULHSU
+                begin
+                    productM_1 = origProductM_1[63:32]; // productE = ($signed(SrcAE) * $signed(SrcBE)) >>> 32; // origProduct[63:32];
+                end
+        endcase
+    end
+
+
    // M-stage result muxes (forwarding sources for EX stage next cycle)
    mux7 #(32) ResultMmux_I0(
        ALUResultM_I0,   // 000 ALU
@@ -997,7 +1050,7 @@ module datapath(
        PCPlus4M_I0,     // 010 return address
        ALUResultM_I0,   // 011 LUI  (folded)
        ALUResultM_I0,   // 100 AUIPC(folded)
-       ALUResultM_I0,   // 101
+       productM_0,   // 101 ALUResultM_I0
        32'h0,           // 110 CSR  (block; forward from WB instead)
        ResultSrcM_I0,
        ResultM_I0
@@ -1010,7 +1063,7 @@ module datapath(
        PCPlus4M_I1,     // 010
        ALUResultM_I1,   // 011
        ALUResultM_I1,   // 100
-       ALUResultM_I1,   // 101
+       productM_1,   // 101 ALUResultM_I1
        32'h0,           // 110 (I1 never does CSR)
        ResultSrcM_I1,
        ResultM_I1
@@ -1025,6 +1078,7 @@ module datapath(
    // I0
    flopr_en #(32) MEM_WB_PCPlus4_I0   (clk, reset, 1'b1, PCPlus4M_I0,        PCPlus4W_I0);
    flopr_en #(32) MEM_WB_ALUResult_I0  (clk, reset, 1'b1, ALUResultM_I0,      ALUResultW_I0);
+   flopr_en #(32) MEM_WB_product_I0  (clk, reset, 1'b1, productM_0,      productW_I0);
    flopr_en #(32) MEM_WB_oldCSR_I0     (clk, reset, 1'b1, oldCSRReadDataM_I0, oldCSRReadDataW_I0);
    flopr_en #(32) MEM_WB_newCSR_I0     (clk, reset, 1'b1, newCSRWriteDataM_I0, newCSRWriteDataW_I0);
    flopr_en #(32) MEM_WB_ReadData_I0   (clk, reset, 1'b1, ReadDataM,           ReadDataW_I0);
@@ -1040,6 +1094,7 @@ module datapath(
    // I1
    flopr_en #(32) MEM_WB_PCPlus4_I1   (clk, reset, 1'b1, PCPlus4M_I1,        PCPlus4W_I1);
    flopr_en #(32) MEM_WB_ALUResult_I1  (clk, reset, 1'b1, ALUResultM_I1,      ALUResultW_I1);
+   flopr_en #(32) MEM_WB_product_I1  (clk, reset, 1'b1, productM_1,      productW_I1);
    flopr_en #(32) MEM_WB_ReadData_I1   (clk, reset, 1'b1, ReadDataM,           ReadDataW_I1);
    flopr_en #(3)  MEM_WB_funct3_I1     (clk, reset, 1'b1, funct3M_I1,         funct3W_I1);
    flopr_en #(5)  MEM_WB_Rd_I1         (clk, reset, 1'b1, RdM_I1,             RdW_I1);
@@ -1067,7 +1122,7 @@ module datapath(
        PCPlus4W_I0,          // 010 return address
        ALUResultW_I0,        // 011 LUI
        ALUResultW_I0,        // 100 AUIPC
-       ALUResultW_I0,        // 101
+       productW_I0,        // 101
        oldCSRReadDataW_I0,   // 110 CSR read value
        ResultSrcW_I0,
        ResultW_I0
@@ -1080,7 +1135,7 @@ module datapath(
        PCPlus4W_I1,          // 010
        ALUResultW_I1,        // 011
        ALUResultW_I1,        // 100
-       ALUResultW_I1,        // 101
+       productW_I1,        // 101
        32'h0,                // 110 (I1 has no CSR access)
        ResultSrcW_I1,
        ResultW_I1
