@@ -12,7 +12,7 @@ output logic [31:0] result);
 
   assign sub = (alucontrol[1:0] == 2'b01);
   assign condinvb = sub ? ~b : b; // for subtraction or slt
-  assign sum_extend = a + condinvb + sub;
+  assign sum_extend = a + condinvb + {31'b0, sub};
   assign sum = sum_extend[31:0];
 
   always_comb

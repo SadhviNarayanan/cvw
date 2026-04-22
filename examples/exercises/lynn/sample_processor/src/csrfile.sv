@@ -36,7 +36,7 @@ module csrfile(
 
 
   // Increment counters every cycle
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk, posedge reset) begin
       if (reset) begin
           cycle <= 0;
           // time_counter <= 0;

@@ -89,6 +89,10 @@ module mulDiv(
                     AHmsb = 1'b1;
                     BHmsb = 1'b1;
                 end
+                default: begin
+                    AHmsb = 1'b0;
+                    BHmsb = 1'b0;
+                end
             endcase
         end
 

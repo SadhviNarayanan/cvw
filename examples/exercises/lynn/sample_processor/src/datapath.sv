@@ -377,12 +377,13 @@ module datapath(
 
     // Buffer overflow detection
     logic value;
+    logic branch_predicted_fetch;
     assign value = ((ReadPtr_next == WritePtr) && (IssueI1 == 0) && // todo added flushE here
                     (buffer_stale == 0 || (BranchD_I1 && PredictedTakenD_I1) || FlushE) && // or if the buffer is stale, then it was due to a branch predicted in I1
                     (PCSrcE == 2'b00));
-
+    // TODO: should what is above be BranchPredictTakenD_I1 instead of PredictedTakenD_I1
     // Combined stall/flush signals
-    assign StallF = StallF_I0_hz | StallF_I1_hz | (value & ~(JALPredictD_I0 & ~StallD));
+    assign StallF = StallF_I0_hz | StallF_I1_hz | (value & ~((JALPredictD_I0 & ~StallD) | branch_predicted_fetch));
     assign StallD = StallD_I0_hz | StallD_I1_hz;
     assign FlushE = FlushE_I0_hz | FlushE_I1_hz;
     assign FlushD = (PCSrcE != 2'b00) | (JALPredictD_I0 & ~StallD);
@@ -423,12 +424,19 @@ module datapath(
     // ============================================================
 
     // Gate ReadPtr advance: only trust IssueI1 once D2 has non-flushed instructions
-    always_ff @(posedge clk) begin
-        if (reset || FlushD_full) d2_valid <= 1'b0;
-        else if (!StallD)         d2_valid <= !buffer_stale;
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            d2_valid <= 1'b0;
+        end else begin
+            if (FlushD_full) begin
+                d2_valid <= 1'b0;
+            end else if (!StallD) begin
+                d2_valid <= !buffer_stale;
+            end
+        end
     end
 
-    assign ReadPtr_next    = (d2_valid && !StallD && !FlushE && free_slots >= 1 && !buffer_stale) ? // todo updated here flushe
+    assign ReadPtr_next    = (d2_valid && !StallD && !FlushE && !FlushD_full && free_slots >= 1 && !buffer_stale) ? // todo updated here flushe
                             ReadPtr + (IssueI1 ? 2 : 1) : ReadPtr;
     assign ReadPtr_next_p1 = ReadPtr_next + 2'd1;
 
@@ -459,7 +467,6 @@ module datapath(
     assign PredictedTakenF_I1 = PHT[BranchIndex_I1][1];
 
     // Branch prediction signals
-    logic branch_predicted_fetch;
     logic branch_predicted_decode;
     assign branch_predicted_fetch  = (isBranchF_I0 & PredictedTakenF_I0 & ~StallD & ~buffer_stale);
     assign branch_predicted_decode = (BranchD_I1 & PredictedTakenD_I1 & ~StallD & (IssueI1 == 0));
@@ -472,8 +479,11 @@ module datapath(
     logic reset_pointers;
     assign reset_pointers = FlushD_full | branch_predicted_fetch;
 
-    always_ff @(posedge clk) begin
-        if (reset || reset_pointers) begin
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            WritePtr <= 2'b00;
+            ReadPtr  <= 2'b00;
+        end else if (reset_pointers) begin
             WritePtr <= 2'b00;
             ReadPtr  <= 2'b00;
         end else begin
@@ -492,9 +502,16 @@ module datapath(
                             (branch_predicted_fetch) |
                             BranchPredictTakenD_I1); // i am predicting branch of i1 in decode now bc of issue checks
 
-    always_ff @(posedge clk) begin
-        if (reset || PC_redirected) buffer_stale <= 1'b1;
-        else if (!StallF)           buffer_stale <= 1'b0;
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            buffer_stale <= 1'b1;
+        end else begin
+            if (PC_redirected) begin
+                buffer_stale <= 1'b1;
+            end else if (!StallF) begin
+                buffer_stale <= 1'b0;
+            end
+        end
     end
 
     // Soft flush (buffer_stale) must be gated by !StallD.
@@ -619,7 +636,7 @@ module datapath(
                     !AnyCSR                  &&
                     !WAW                     &&
                     (free_slots >= 3'd2)     &&
-                    !StallD && !FlushD && !buffer_stale) || PCD_I1 == 32'b0; //todo added 0 clause always allow I1 if it's the first instruction (PC=0) to get the pipeline going
+                    !StallD && !FlushD && !buffer_stale); //todo added 0 clause always allow I1 if it's the first instruction (PC=0) to get the pipeline going
 
 
    // Register file (4-read, 2-write)
@@ -854,9 +871,15 @@ module datapath(
 
 
    // ---- Branch/Jump resolution ----
-   // At most one lane has a branch/jump per pair (BothBranches blocks I1 issue).
-   // I0 takes priority; if I0 has no branch/jump, use I1's signals.
-   assign UseBranchI0 = BranchE_I0 || JumpE_I0;
+   // I0 takes priority, EXCEPT when I0 has a not-taken branch and I1 has a jump:
+   // in that case I1's jump must still redirect the PC.
+   // If I0's branch IS taken (mispredict), I0 wins even over an I1 jump.
+   assign UseBranchI0 = JumpE_I0 || (BranchE_I0 && (~(JumpE_I1 && ~take_branchE_I0) || take_branchE_I0));
+   // assign UseBranchI0 = JumpE_I0 || BranchE_I0;
+
+   // Gate JAL-already-predicted on which lane's jump is actually being used:
+    logic JALPredictE_branch;
+    assign JALPredictE_branch = UseBranchI0 ? JALPredictE_I0 : 1'b0; // I1 JAL never pre-predicted
 
 
    assign BranchE_branch         = UseBranchI0 ? BranchE_I0         : BranchE_I1;
@@ -878,7 +901,7 @@ module datapath(
    always_comb begin
        if      (BranchMispredictE &  BranchTakenE)              PCSrcE = 2'b01; // predicted NT, actually T
        else if (BranchMispredictE & ~BranchTakenE)              PCSrcE = 2'b11; // predicted T,  actually NT
-       else if (JumpE_branch && ~ALUSrcE_branch && JALPredictE_I0) PCSrcE = 2'b00; // JAL already redirected at decode
+       else if (JumpE_branch && ~ALUSrcE_branch && JALPredictE_branch) PCSrcE = 2'b00; // JAL already redirected at decode
        else if (JumpE_branch && ~ALUSrcE_branch)                 PCSrcE = 2'b01; // JAL not predicted, redirect now
        else if (JumpE_branch &&  ALUSrcE_branch)                 PCSrcE = 2'b10; // JALR
        else                                                       PCSrcE = 2'b00;
@@ -892,7 +915,7 @@ module datapath(
 
    // PHT update (saturating 2-bit counter)
    assign indexE = PCE_branch[5:2] ^ {1'b0, GHR_snapE};
-   always_ff @(posedge clk) begin
+   always_ff @(posedge clk, posedge reset) begin
        if (reset) begin
            for (int i = 0; i < 16; i++)
                PHT[i] <= 2'b01;           // reset to weakly not-taken
@@ -1008,37 +1031,47 @@ module datapath(
                              funct3M_I0, newCSRWriteDataM_I0);
 
 
+    logic signed [34:0] P12M_I0;
+    assign P12M_I0 = {P1_M_I0[33], P1_M_I0} + {P2_M_I0[33], P2_M_I0};
+
+    logic signed [63:0] op_hi_I0, op_lo_I0;
+
+    assign op_hi_I0 = {{30{P0_M_I0[33]}}, P0_M_I0};
+
+    assign op_lo_I0 = ({{13{P12M_I0[34]}}, P12M_I0} << 16)
+                    + {{30{P3_M_I0[33]}},  P3_M_I0};
+
     logic [63:0] origProductM_0;
+    assign origProductM_0 = (op_hi_I0 << 32) + op_lo_I0;
+
     logic [31:0] productM_0;
-     // assign origProduct = (P0 << 32) + (P1 << 16) + (P2 << 16) + P3;
-    assign origProductM_0 = ({{32{P0_M_I0[33]}}, P0_M_I0} << 32) +
-                        ({{32{P1_M_I0[33]}}, P1_M_I0} << 16) +
-                        ({{32{P2_M_I0[33]}}, P2_M_I0} << 16) +
-                        {{32{P3_M_I0[33]}}, P3_M_I0};
+
     always_comb begin
         case (funct3M_I0)
-            3'b000: productM_0 = origProductM_0[31:0]; // MUL {$signed(SrcAE) * $signed(SrcBE)}[31:0];
-            default:  // MULH, MULHU, MULHSU
-                begin
-                    productM_0 = origProductM_0[63:32]; // productE = ($signed(SrcAE) * $signed(SrcBE)) >>> 32; // origProduct[63:32];
-                end
+            3'b000: productM_0 = origProductM_0[31:0];
+            default: productM_0 = origProductM_0[63:32];
         endcase
     end
 
+    logic signed [34:0] P12M_I1;
+    assign P12M_I1 = {P1_M_I1[33], P1_M_I1} + {P2_M_I1[33], P2_M_I1};
+
+    logic signed [63:0] op_hi_I1, op_lo_I1;
+
+    assign op_hi_I1 = {{30{P0_M_I1[33]}}, P0_M_I1};
+
+    assign op_lo_I1 = ({{13{P12M_I1[34]}}, P12M_I1} << 16)
+                    + {{30{P3_M_I1[33]}},  P3_M_I1};
+
     logic [63:0] origProductM_1;
+    assign origProductM_1 = (op_hi_I1 << 32) + op_lo_I1;
+
     logic [31:0] productM_1;
-     // assign origProduct = (P0 << 32) + (P1 << 16) + (P2 << 16) + P3;
-    assign origProductM_1 = ({{32{P0_M_I1[33]}}, P0_M_I1} << 32) +
-                        ({{32{P1_M_I1[33]}}, P1_M_I1} << 16) +
-                        ({{32{P2_M_I1[33]}}, P2_M_I1} << 16) +
-                        {{32{P3_M_I1[33]}}, P3_M_I1};
+
     always_comb begin
         case (funct3M_I1)
-            3'b000: productM_1 = origProductM_1[31:0]; // MUL {$signed(SrcAE) * $signed(SrcBE)}[31:0];
-            default:  // MULH, MULHU, MULHSU
-                begin
-                    productM_1 = origProductM_1[63:32]; // productE = ($signed(SrcAE) * $signed(SrcBE)) >>> 32; // origProduct[63:32];
-                end
+            3'b000: productM_1 = origProductM_1[31:0];
+            default: productM_1 = origProductM_1[63:32];
         endcase
     end
 
@@ -1051,7 +1084,7 @@ module datapath(
        ALUResultM_I0,   // 011 LUI  (folded)
        ALUResultM_I0,   // 100 AUIPC(folded)
        productM_0,   // 101 ALUResultM_I0
-       32'h0,           // 110 CSR  (block; forward from WB instead)
+       oldCSRReadDataM_I0,           // 110 CSR  (block; forward from WB instead)
        ResultSrcM_I0,
        ResultM_I0
    );

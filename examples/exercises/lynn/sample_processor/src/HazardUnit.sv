@@ -45,21 +45,21 @@ module HazardUnit(
     // Priority: same-lane M > cross-lane M > same-lane W > cross-lane W
     // ----------------------------------------------------------------
     always_comb begin
-        if      (Rs1E != 0 && RegWriteM_other && Rs1E == RdM_other) ForwardAE = 3'b100; // cross-lane M
-        else if (Rs1E != 0 && RegWriteM       && Rs1E == RdM)       ForwardAE = 3'b010; // same-lane  M
+        if      (Rs1E != 0 && RegWriteM       && Rs1E == RdM)       ForwardAE = 3'b010; // same-lane M first
+        else if (Rs1E != 0 && RegWriteM_other && Rs1E == RdM_other) ForwardAE = 3'b100; // cross-lane M
+        else if (Rs1E != 0 && RegWriteW       && Rs1E == RdW)       ForwardAE = 3'b001; // same-lane W
         else if (Rs1E != 0 && RegWriteW_other && Rs1E == RdW_other) ForwardAE = 3'b011; // cross-lane W
-        else if (Rs1E != 0 && RegWriteW       && Rs1E == RdW)       ForwardAE = 3'b001; // same-lane  W
-        else                                                          ForwardAE = 3'b000; // reg file
+        else                                                          ForwardAE = 3'b000;
     end
 
     // ----------------------------------------------------------------
     // Forwarding (SrcB / Rs2E)
     // ----------------------------------------------------------------
     always_comb begin
-        if      (Rs2E != 0 && RegWriteM_other && Rs2E == RdM_other) ForwardBE = 3'b100;
-        else if (Rs2E != 0 && RegWriteM       && Rs2E == RdM)       ForwardBE = 3'b010;
-        else if (Rs2E != 0 && RegWriteW_other && Rs2E == RdW_other) ForwardBE = 3'b011;
-        else if (Rs2E != 0 && RegWriteW       && Rs2E == RdW)       ForwardBE = 3'b001;
+        if      (Rs2E != 0 && RegWriteM       && Rs2E == RdM)       ForwardBE = 3'b010; // same-lane M
+        else if (Rs2E != 0 && RegWriteM_other && Rs2E == RdM_other) ForwardBE = 3'b100; // cross-lane M
+        else if (Rs2E != 0 && RegWriteW       && Rs2E == RdW)       ForwardBE = 3'b001; // same-lane W
+        else if (Rs2E != 0 && RegWriteW_other && Rs2E == RdW_other) ForwardBE = 3'b011; // cross-lane W
         else                                                          ForwardBE = 3'b000;
     end
 
@@ -72,8 +72,8 @@ module HazardUnit(
                      ((RdE == Rs1D)       || (RdE == Rs2D) ||
                       (RdE == Rs1D_other) || (RdE == Rs2D_other));
 
-    assign StallF = lwStall;
-    assign StallD = lwStall;
+    assign StallF = lwStall & (PCSrcE == 2'b00);
+    assign StallD = lwStall & (PCSrcE == 2'b00);
 
     // ----------------------------------------------------------------
     // Control hazard
