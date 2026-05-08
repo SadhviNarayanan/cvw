@@ -1,7 +1,5 @@
-// datapath.sv
-// Superscalar in-order 2-wide RISC-V datapath
-// Stages: Fetch → Decode → Execute → Memory → Writeback
-
+// NOTE: if we did everything without PCSrcE can we eliminate it from everywhere else? bc it will eliminate the circular loop we
+// curently havinh
 
 module datapath(
    input  logic        clk, reset,
@@ -55,13 +53,12 @@ module datapath(
    // SIGNAL DECLARATIONS  (single unified block — no duplicates)
    // ============================================================
 
-
    // Branch Prediction
-   // 16-entry tagless BTB + 16-entry correlating PHT with 3-bit GHR.
-   logic [2:0] GHR;
-   logic [2:0] GHR_snapD;
-   logic [2:0] GHR_snapE;
-   logic [1:0] PHT [15:0];   // 16-entry PHT, indexed by PC[5:2]^GHR
+   // 128-entry gshare PHT with 7-bit GHR.
+   logic [7:0] GHR;
+   logic [7:0] GHR_snapD;
+   logic [7:0] GHR_snapE;
+   logic [1:0] PHT [255:0];  // 128-entry PHT, indexed by PC[8:2]^GHR
 
 
    // ------------------------------------------------------------
@@ -79,7 +76,8 @@ module datapath(
    logic [1:0]  ReadPtr, WritePtr;
 
 
-   logic [1:0] ReadPtr_next, ReadPtr_next_p1;
+   logic [1:0] ReadPtr_next;
+   logic [1:0] ReadPtr_next_p1_fast;
    logic d2_valid;
 
    logic PC_redirected;
@@ -88,10 +86,9 @@ module datapath(
    // Buffer-output branch signals (pre-IF/ID register; used for fetch-stage redirect)
    logic [31:0] InstrToDecodeI0, InstrToDecodeI1;
    logic [31:0] PCToDecodeI0,    PCToDecodeI1;
-   logic        isBranchF_I0,    isBranchF_I1;   // detected at buffer output
-   logic [3:0]  BranchIndex_I0,  BranchIndex_I1;
-   logic        PredictedTakenF_I0, PredictedTakenF_I1;
-   logic [31:0] BranchTargetF_I0,   BranchTargetF_I1;
+   logic        isBranchF_I0;
+   logic [7:0]  BranchIndex_I0;
+   logic        PredictedTakenF_I0;
 
 
    // JAL decode-stage prediction signals
@@ -110,7 +107,6 @@ module datapath(
 
 
    // PC steering
-   logic [1:0]  PCSelect;
    logic [31:0] PCMux3In;
 
 
@@ -147,7 +143,7 @@ module datapath(
    // ------------------------------------------------------------
    // Hazard / Stall / Flush
    // ------------------------------------------------------------
-   // Per-lane outputs from HazardUnit instances
+   // Per-lane outputs from HazardUnit insntances
    logic StallF_I0_hz, StallF_I1_hz;
    logic StallD_I0_hz, StallD_I1_hz;
    logic FlushD_I0_hz, FlushD_I1_hz; // wired but FlushD computed directly
@@ -157,6 +153,29 @@ module datapath(
 
    // Combined pipeline control
    logic StallF, StallD, FlushD, FlushE;
+   logic StallD_hz;          // raw stall from hazard units, no PCSrcE masking — for PCMux3In
+   logic IssueI1_noflushd;   // IssueI1 without !FlushD — for PCMux3In timing
+   logic BranchPredictTakenD_I1_fast; // no PCSrcE/comparator dependency — for PCMux3In
+
+   // Fetch-stage fast signals: use ReadPtr_next_fast (no PCSrcE) for PCMux3In to avoid
+   // false timing path: comparator→PCSrcE→{StallD,FlushE}→ReadPtr_next→BranchTargetF_I0→pcmux d0
+   logic [1:0]  ReadPtr_next_fast;
+   logic [31:0] BranchTargetF_I0_fast;
+   logic        isBranchF_I0_fast, PredictedTakenF_I0_fast;
+   logic        PredictedTakenF_I1_fast;
+   // Precomputed branch info for every buffer slot (constant index → no dynamic mux in computation).
+   logic [31:0] BranchTarget_buf [3:0];
+   logic        isBranch_buf     [3:0];
+   logic        predTaken_buf    [3:0];
+
+   // Fast buffer write-enable signals: no PCSrcE dependency.
+   // Used in PCBuffer/InstrBuffer write enable to break the false path:
+   //   comparator→PCSrcE→StallF/FlushD_full(many gates)→PCBuffer write enable→PCBuffer D
+   logic        branch_predicted_fetch_fast; // fetch-stage branch pred using fast signals
+   logic        value_fast;                  // buffer-full stall, no PCSrcE
+   logic        StallF_fast;                 // stall from hazard units + value, no PCSrcE
+   logic        FlushD_full_fast;            // JAL + I1-branch pred, no PCSrcE
+   logic        PCBuffer_write_en;           // combined write enable for InstrBuffer/PCBuffer
 
 
    // Forwarding selects from HazardUnit (3-bit: encodes same-lane and cross-lane sources)
@@ -225,7 +244,7 @@ module datapath(
    logic        take_branchE_branch;
    logic [31:0] PCE_branch, PCPlus4E, PCTargetE, ALUResultE;
    logic        BranchTakenE, BranchMispredictE;
-   logic [3:0]  indexE;
+   logic [7:0]  indexE;
 
 
    // ------------------------------------------------------------
@@ -242,7 +261,11 @@ module datapath(
    logic [2:0]  ResultSrcM_I0;
    logic [31:0] oldCSRReadDataM_I0, newCSRWriteDataM_I0;
    logic [31:0] ResultM_I0;
-   logic [33:0] P0_M_I0, P1_M_I0, P2_M_I0, P3_M_I0; // pipelined mul results for I0 (for forwarding and writeback)
+   // Partial products registered at EX/MEM boundary: computed in EX, accumulated in MEM.
+   logic signed [17:0] P00_M, P01_M, P02_M, P03_M;
+   logic signed [17:0] P10_M, P11_M, P12_M, P13_M;
+   logic signed [17:0] P20_M, P21_M, P22_M, P23_M;
+   logic signed [17:0] P30_M, P31_M, P32_M, P33_M;
 
 
    // ------------------------------------------------------------
@@ -258,7 +281,7 @@ module datapath(
    logic        RegWriteM_I1, MemWriteM_I1, CSRWriteM_I1, LoadM_I1;
    logic [2:0]  ResultSrcM_I1;
    logic [31:0] ResultM_I1;
-   logic [33:0] P0_M_I1, P1_M_I1, P2_M_I1, P3_M_I1; // pipelined mul results for I1 (for forwarding and writeback)
+   // I1 uses the same MEM-computed partial products (P00_M..P33_M) as I0.
 
 
 
@@ -320,17 +343,20 @@ module datapath(
        .ResultSrcE_b0 (ResultSrcE_I0[0]),
        .Load           (LoadE_I0),
        .RegWriteE     (RegWriteE_I0),
-       .PCSrcE        (PCSrcE),
-       .BranchMispredictE(BranchMispredictE),
+    //    .PCSrcE        (PCSrcE),
+    //    .BranchMispredictE(BranchMispredictE),
        .RdM           (RdM_I0),   .RegWriteM     (RegWriteM_I0),
        .RdW           (RdW_I0),   .RegWriteW     (RegWriteW_I0),
+       .RdE_other     (RdE_I1),
        .RdM_other     (RdM_I1),   .RegWriteM_other(RegWriteM_I1),
        .RdW_other     (RdW_I1),   .RegWriteW_other(RegWriteW_I1),
        .Rs1D_other    (Rs1D_I1),  .Rs2D_other    (Rs2D_I1),
+       .isMulE        (ResultSrcE_I0 == 3'b101),
+       .isMulE_other  (ResultSrcE_I1 == 3'b101),
        .StallF        (StallF_I0_hz),
        .StallD        (StallD_I0_hz),
        .FlushD        (FlushD_I0_hz),
-       .FlushE        (FlushE_I0_hz),
+    //    .FlushE        (FlushE_I0_hz),
        .ForwardAE     (ForwardAE_I0),
        .ForwardBE     (ForwardBE_I0)
    );
@@ -345,17 +371,20 @@ module datapath(
        .ResultSrcE_b0 (ResultSrcE_I1[0]),
        .Load           (LoadE_I1),
        .RegWriteE     (RegWriteE_I1),
-       .PCSrcE        (PCSrcE),
-       .BranchMispredictE(BranchMispredictE),
+    //    .PCSrcE        (PCSrcE),
+    //    .BranchMispredictE(BranchMispredictE),
        .RdM           (RdM_I1),   .RegWriteM     (RegWriteM_I1),
        .RdW           (RdW_I1),   .RegWriteW     (RegWriteW_I1),
+       .RdE_other     (RdE_I0),
        .RdM_other     (RdM_I0),   .RegWriteM_other(RegWriteM_I0),
        .RdW_other     (RdW_I0),   .RegWriteW_other(RegWriteW_I0),
        .Rs1D_other    (Rs1D_I0),  .Rs2D_other    (Rs2D_I0),
+       .isMulE        (ResultSrcE_I1 == 3'b101),
+       .isMulE_other  (ResultSrcE_I0 == 3'b101),
        .StallF        (StallF_I1_hz),
        .StallD        (StallD_I1_hz),
        .FlushD        (FlushD_I1_hz),
-       .FlushE        (FlushE_I1_hz),
+    //    .FlushE        (FlushE_I1_hz),
        .ForwardAE     (ForwardAE_I1),
        .ForwardBE     (ForwardBE_I1)
    );
@@ -382,11 +411,34 @@ module datapath(
                     (buffer_stale == 0 || (BranchD_I1 && PredictedTakenD_I1) || FlushE) && // or if the buffer is stale, then it was due to a branch predicted in I1
                     (PCSrcE == 2'b00));
     // TODO: should what is above be BranchPredictTakenD_I1 instead of PredictedTakenD_I1
+
     // Combined stall/flush signals
-    assign StallF = StallF_I0_hz | StallF_I1_hz | (value & ~((JALPredictD_I0 & ~StallD) | branch_predicted_fetch));
-    assign StallD = StallD_I0_hz | StallD_I1_hz;
-    assign FlushE = FlushE_I0_hz | FlushE_I1_hz;
+    // assign StallF = StallF_I0_hz | StallF_I1_hz | (value & ~((JALPredictD_I0 & ~StallD) | branch_predicted_fetch));
+    // assign StallD = StallD_I0_hz | StallD_I1_hz;
+    // assign FlushE = FlushE_I0_hz | FlushE_I1_hz;
+    // assign FlushD = (PCSrcE != 2'b00) | (JALPredictD_I0 & ~StallD);
+    // FlushE for load/mul stalls (from hazard units)
+    logic FlushE_stall;
+    assign FlushE_stall = FlushD_I0_hz | FlushD_I1_hz;  // HazardUnit outputs FlushD for stalls
+
+    // FlushE for branch misprediction (simple logic, no dependency checking needed)
+    logic FlushE_branch;
+    assign FlushE_branch = (PCSrcE != 2'b00);
+
+    // Combined FlushE
+    assign FlushE = FlushE_stall | FlushE_branch;
+
+    // Combined stalls - coordinate with branch resolution
+    // Don't stall when taking a branch (the branch flush overrides the stall)
+    assign StallF = (StallF_I0_hz | StallF_I1_hz | (value & ~((JALPredictD_I0 & ~StallD) | branch_predicted_fetch))) & (PCSrcE == 2'b00);
+    assign StallD = (StallD_I0_hz | StallD_I1_hz) & (PCSrcE == 2'b00);
+
+    // FlushD combines hazard unit flushes with branch/JAL redirects
     assign FlushD = (PCSrcE != 2'b00) | (JALPredictD_I0 & ~StallD);
+
+    // Raw stall from hazard units only — no PCSrcE masking.
+    // Used in PCMux3In to avoid false timing path: comparator→PCSrcE→StallD→PCMux3In.
+    assign StallD_hz = StallD_I0_hz | StallD_I1_hz;
 
 
     // ============================================================
@@ -400,7 +452,14 @@ module datapath(
         $display("[TB] ENTRY_ADDR = 0x%h", entry_addr);
     end
 
-    flopr_en_reset #(32) pcreg(clk, reset, ~StallF, entry_addr, PCNextF, PCF);
+    // pcreg enable: use !StallF_fast | FlushE_branch rather than !StallF
+    // to avoid the long comparator→PCSrcE→StallF (23-gate) enable path.
+    // FlushE_branch = PCSrcE[0]|PCSrcE[1] (1 gate from PCSrcE; arrives at ~3.1 ns)
+    // !StallF_fast = precomputed from hazard units (arrives well before comparator finishes)
+    // Equivalent to !StallF: when PCSrcE==00, StallF_fast==StallF; when PCSrcE!=00, both =1.
+    logic pcreg_en;
+    assign pcreg_en = !StallF_fast | FlushE_branch;
+    flopr_en_reset #(32) pcreg(clk, reset, pcreg_en, entry_addr, PCNextF, PCF);
     adder pcadd4 (PCF, 32'd4, PCPlus4F);
     adder pcadd8 (PCF, 32'd8, PCPlus8F);
 
@@ -408,13 +467,15 @@ module datapath(
     assign InstrF_0 = Instr[63:32];
     assign InstrF_1 = Instr[31:0];
 
-    // Write fetched pair into circular instruction buffer
+    // Write fetched pair into circular instruction buffer.
+    // PCBuffer_write_en uses FlushE_branch (1 gate from PCSrcE) rather than the long
+    // StallF/FlushD_full chain, to keep the comparator→PCBuffer write path short.
     always_ff @(posedge clk) begin
-        if (!StallF && !FlushD_full) begin
+        if (PCBuffer_write_en) begin
             InstrBuffer[WritePtr]     <= InstrF_0;
             PCBuffer[WritePtr]        <= PCF;
             InstrBuffer[WritePtr + 1] <= InstrF_1;
-            PCBuffer[WritePtr + 1]    <= PCF + 4;
+            PCBuffer[WritePtr + 1]    <= PCPlus4F;
         end
     end
 
@@ -438,38 +499,68 @@ module datapath(
 
     assign ReadPtr_next    = (d2_valid && !StallD && !FlushE && !FlushD_full && free_slots >= 1 && !buffer_stale) ? // todo updated here flushe
                             ReadPtr + (IssueI1 ? 2 : 1) : ReadPtr;
-    assign ReadPtr_next_p1 = ReadPtr_next + 2'd1;
 
-    assign InstrToDecodeI0 = InstrBuffer[ReadPtr_next];
-    assign PCToDecodeI0    = PCBuffer[ReadPtr_next];
-    assign InstrToDecodeI1 = InstrBuffer[ReadPtr_next_p1];
-    assign PCToDecodeI1    = PCBuffer[ReadPtr_next_p1];
+    // ReadPtr_next_fast: no PCSrcE or StallD_hz dependency.
+    // "Wrong" during stalls is harmless: pcreg and IF/ID registers are gated, so no state is captured.
+    assign ReadPtr_next_fast = (d2_valid && !FlushE_stall &&
+                                !(JALPredictD_I0 | BranchPredictTakenD_I1_fast) &&
+                                free_slots >= 1 && !buffer_stale) ?
+                               ReadPtr + (IssueI1_noflushd ? 2 : 1) : ReadPtr;
+    assign ReadPtr_next_p1_fast = ReadPtr_next_fast + 2'd1;
+
+    assign InstrToDecodeI0 = InstrBuffer[ReadPtr_next_fast];
+    assign PCToDecodeI0    = PCBuffer[ReadPtr_next_fast];
+    assign InstrToDecodeI1 = InstrBuffer[ReadPtr_next_p1_fast];
+    assign PCToDecodeI1    = PCBuffer[ReadPtr_next_p1_fast];
 
 
     // ============================================================
     // BRANCH PREDICTION
     // ============================================================
 
-    // Branch detection
+    // Branch detection (I0 only; I1 uses fast version)
     assign isBranchF_I0 = (InstrToDecodeI0[6:0] == 7'b1100011);
-    assign isBranchF_I1 = (InstrToDecodeI1[6:0] == 7'b1100011);
 
-    // Branch targets
-    assign BranchTargetF_I0 = PCToDecodeI0 + {{20{InstrToDecodeI0[31]}}, InstrToDecodeI0[7],
-                            InstrToDecodeI0[30:25], InstrToDecodeI0[11:8], 1'b0};
-    assign BranchTargetF_I1 = PCToDecodeI1 + {{20{InstrToDecodeI1[31]}}, InstrToDecodeI1[7],
-                            InstrToDecodeI1[30:25], InstrToDecodeI1[11:8], 1'b0};
-
-    // PHT indexing
-    assign BranchIndex_I0     = PCToDecodeI0[5:2] ^ {1'b0, GHR};
-    assign BranchIndex_I1     = PCToDecodeI1[5:2] ^ {1'b0, GHR};
+    // PHT indexing (I0 only; I1 and IF/ID register use fast versions)
+    assign BranchIndex_I0     = PCToDecodeI0[9:2] ^ GHR;
     assign PredictedTakenF_I0 = PHT[BranchIndex_I0][1];
-    assign PredictedTakenF_I1 = PHT[BranchIndex_I1][1];
+
+    // Precompute branch info for ALL 4 buffer entries in parallel using constant slot indices.
+    // Each slot's computation starts from registered InstrBuffer[k]/PCBuffer[k] values, so no
+    // dynamic mux is needed in the hot path.  The only dynamic mux is the cheap final select
+    // driven by ReadPtr_next_fast (2-bit, just select delay — no adder on the critical path).
+    genvar k;
+    generate
+        for (k = 0; k < 4; k++) begin : gen_bp_pre
+            assign isBranch_buf[k]     = (InstrBuffer[k][6:0] == 7'b1100011);
+            assign predTaken_buf[k]    = PHT[PCBuffer[k][9:2] ^ GHR][1];
+            assign BranchTarget_buf[k] = PCBuffer[k] + {{20{InstrBuffer[k][31]}},
+                                                         InstrBuffer[k][7],
+                                                         InstrBuffer[k][30:25],
+                                                         InstrBuffer[k][11:8], 1'b0};
+        end
+    endgenerate
+
+    assign isBranchF_I0_fast       = isBranch_buf[ReadPtr_next_fast];
+    assign PredictedTakenF_I0_fast = predTaken_buf[ReadPtr_next_fast];
+    assign BranchTargetF_I0_fast   = BranchTarget_buf[ReadPtr_next_fast];
+    assign PredictedTakenF_I1_fast = predTaken_buf[ReadPtr_next_p1_fast];
 
     // Branch prediction signals
     logic branch_predicted_decode;
     assign branch_predicted_fetch  = (isBranchF_I0 & PredictedTakenF_I0 & ~StallD & ~buffer_stale);
     assign branch_predicted_decode = (BranchD_I1 & PredictedTakenD_I1 & ~StallD & (IssueI1 == 0));
+
+    // Fast (no PCSrcE) versions for PCBuffer/InstrBuffer write enable.
+    assign branch_predicted_fetch_fast = isBranchF_I0_fast & PredictedTakenF_I0_fast & ~buffer_stale;
+    assign FlushD_full_fast            = JALPredictD_I0 | BranchPredictTakenD_I1_fast;
+    assign value_fast                  = ((ReadPtr_next_fast == WritePtr) && !IssueI1_noflushd &&
+                                          (!buffer_stale || (BranchD_I1 && PredictedTakenD_I1) || FlushE_stall));
+    assign StallF_fast                 = StallF_I0_hz | StallF_I1_hz |
+                                         (value_fast & ~(branch_predicted_fetch_fast | JALPredictD_I0));
+    // PCBuffer_write_en: uses FlushE_branch as the sole PCSrcE-dependent term (1 gate from PCSrcE),
+    // avoiding the long StallF/FlushD_full path from the comparator.
+    assign PCBuffer_write_en = !FlushE_branch && !StallF_fast && !FlushD_full_fast;
 
 
     // ============================================================
@@ -488,7 +579,7 @@ module datapath(
             ReadPtr  <= 2'b00;
         end else begin
             ReadPtr <= ReadPtr_next;
-            if (!StallF) WritePtr <= WritePtr + 2;
+            if (!StallF_fast) WritePtr <= WritePtr + 2;
         end
     end
 
@@ -528,27 +619,22 @@ module datapath(
     // PC SELECTION MUX
     // ============================================================
 
-    always_comb begin
-        PCMux3In = PCPlus8F;
-        PCSelect = 2'b00;
-        if (PCSrcE != 2'b00) begin
-            PCMux3In = (PCSrcE == 2'b11) ? PCPlus4E : PCPlus8F;
-            PCSelect = PCSrcE;
-        end else if (JALPredictD_I0 & ~StallD) begin
-            PCMux3In = JALTargetD_I0;
-            PCSelect = 2'b11;
-        end else if (BranchPredictTakenD_I1) begin
-            // I1 predicted-taken branch: redirect at Decode (after IssueI1 is known)
-            PCMux3In = BranchTargetD_I1;
-            PCSelect = 2'b11;
-        end else if (isBranchF_I0 && PredictedTakenF_I0 && !StallD && !buffer_stale) begin
-            PCMux3In = BranchTargetF_I0;
-            PCSelect = 2'b11;
-        end
-    end
+    // PCMux3In: prediction-only default next-PC (no PCSrcE/comparator dependency).
+    // All signals use "fast" variants to eliminate false timing paths from comparator through PCSrcE.
+    always_comb
+        if      (JALPredictD_I0)                                               PCMux3In = JALTargetD_I0;
+        else if (BranchPredictTakenD_I1_fast)                                  PCMux3In = BranchTargetD_I1;
+        else if (isBranchF_I0_fast & PredictedTakenF_I0_fast & ~buffer_stale) PCMux3In = BranchTargetF_I0_fast;
+        else                                                                    PCMux3In = PCPlus8F;
 
-    mux4 #(32) pcmux(PCPlus8F, PCTargetE, {ALUResultE[31:1], 1'b0}, PCMux3In,
-                    PCSelect, PCNextF);
+    // Use PCSrcE directly as the pcmux select — no PCSelect layer needed.
+    // pcmux encoding mirrors PCSrcE:
+    //   2'b00 → PCMux3In  (prediction target or PCPlus8F, fast; PCSrcE==0 means no EX redirect)
+    //   2'b01 → PCTargetE (taken-branch correction or unpredicted JAL)
+    //   2'b10 → ALUResultE (JALR)
+    //   2'b11 → PCPlus4E  (not-taken correction; PCPlus4E is fast, no PCMux3In indirection)
+    mux4 #(32) pcmux(PCMux3In, PCTargetE, {ALUResultE[31:1], 1'b0}, PCPlus4E,
+                    PCSrcE, PCNextF);
 
 
    // ============================================================
@@ -558,9 +644,9 @@ module datapath(
    flopr_en_flush #(32) IF_ID_PC_I1        (clk, reset, ~StallD, FlushD_ifid, PCToDecodeI1,      PCD_I1);
    flopr_en_flush #(32) IF_ID_Instr_I0     (clk, reset, ~StallD, FlushD_ifid, InstrToDecodeI0,   InstrD_I0);
    flopr_en_flush #(32) IF_ID_Instr_I1     (clk, reset, ~StallD, FlushD_ifid, InstrToDecodeI1,   InstrD_I1);
-   flopr_en_flush #(1)  IF_ID_BranchPred_I0(clk, reset, ~StallD, FlushD_ifid, PredictedTakenF_I0, PredictedTakenD_I0);
-   flopr_en_flush #(1)  IF_ID_BranchPred_I1(clk, reset, ~StallD, FlushD_ifid, PredictedTakenF_I1, PredictedTakenD_I1);
-   flopr_en_flush #(3)  IF_ID_GHR          (clk, reset, ~StallD, FlushD_ifid, GHR,               GHR_snapD);
+   flopr_en_flush #(1)  IF_ID_BranchPred_I0(clk, reset, ~StallD, FlushD_ifid, PredictedTakenF_I0_fast, PredictedTakenD_I0);
+   flopr_en_flush #(1)  IF_ID_BranchPred_I1(clk, reset, ~StallD, FlushD_ifid, PredictedTakenF_I1_fast, PredictedTakenD_I1);
+   flopr_en_flush #(8)  IF_ID_GHR          (clk, reset, ~StallD, FlushD_ifid, GHR,               GHR_snapD);
 
 
    // ============================================================
@@ -614,6 +700,13 @@ module datapath(
                           (Rs2UsedD_I1 && RdD_I0 == Rs2D_I1));
 
 
+   // Multiply detection (opcode=0110011, funct7=0000001)
+   logic isMulD_I0, isMulD_I1, BothMuls;
+   assign isMulD_I0 = (OpcodeD_I0 == 7'b0110011) && (InstrD_I0[31:25] == 7'b0000001);
+   assign isMulD_I1 = (OpcodeD_I1 == 7'b0110011) && (InstrD_I1[31:25] == 7'b0000001);
+   assign BothMuls  = isMulD_I0 && isMulD_I1;
+
+
    assign BothBranches            = BranchD_I0 && BranchD_I1;
    assign I0_PredictedTakenBranch = BranchD_I0 && PredictedTakenD_I0;
    assign BothMemOps              = (MemWriteD_I0 || LoadD_I0) &&
@@ -631,12 +724,33 @@ module datapath(
    assign IssueI1 = (!IntraPairRAW            &&
                     !BothBranches            &&
                     !I0_PredictedTakenBranch &&
+                    !(BranchD_I0 && JumpD_I1) &&
                     !BothMemOps              &&
                     !I0_IsJump               &&
                     !AnyCSR                  &&
                     !WAW                     &&
+                    !BothMuls                &&
                     (free_slots >= 3'd2)     &&
                     !StallD && !FlushD && !buffer_stale); //todo added 0 clause always allow I1 if it's the first instruction (PC=0) to get the pipeline going
+
+   // IssueI1 without PCSrcE-dependent terms (!StallD, !FlushD) — for PCMux3In fast path.
+   // When PCSrcE==00: IssueI1_noflushd == IssueI1 (since !I0_IsJump implies !JALPredictD_I0,
+   // so FlushD==0 and StallD==StallD_hz in that case).
+   // When PCSrcE!=00: PCMux3In is not selected by pcmux anyway (false path).
+   // StallD_hz removed: downstream registers (pcreg, IF/ID) are gated during stalls,
+   // so a "wrong" value here during a stall cycle causes no state corruption.
+   assign IssueI1_noflushd = (!IntraPairRAW            &&
+                               !BothBranches            &&
+                               !I0_PredictedTakenBranch &&
+                               !(BranchD_I0 && JumpD_I1) &&
+                               !BothMemOps              &&
+                               !I0_IsJump               &&
+                               !AnyCSR                  &&
+                               !WAW                     &&
+                               !BothMuls                &&
+                               (free_slots >= 3'd2)     &&
+                               !buffer_stale);
+   assign BranchPredictTakenD_I1_fast = BranchD_I1 & PredictedTakenD_I1 & IssueI1_noflushd & (~(BranchD_I0 & PredictedTakenD_I0));
 
 
    // Register file (4-read, 2-write)
@@ -659,8 +773,8 @@ module datapath(
    // need to distinguish JAL from JALR (ALUSrc=1)
    assign isJALD_I0    = JumpD_I0 & ~ALUSrcD_I0;
    assign JALTargetD_I0 = PCD_I0 + ImmExtD_I0;
-   // Only predict if not already stalled and not being flushed from execute
-   assign JALPredictD_I0 = isJALD_I0 & ~(PCSrcE != 2'b00);
+   // Predict JAL at decode; pcmux input already handles priority via PCSrcE select.
+   assign JALPredictD_I0 = isJALD_I0;
 
    // I1 branch decode-stage prediction:
     // Redirect at Decode (not Fetch) so IssueI1 is already known — avoids the problem
@@ -668,7 +782,7 @@ module datapath(
     // and the branch never reaching Execute for resolution.
     // IssueI1 does NOT check FlushD_full (no combinatorial loop).
     assign BranchTargetD_I1    = PCD_I1 + ImmExtD_I1;
-    assign BranchPredictTakenD_I1 = BranchD_I1 & PredictedTakenD_I1 & IssueI1 & (PCSrcE == 2'b00) & (~ (BranchD_I0 & PredictedTakenD_I0));  // todo just added this last part
+    assign BranchPredictTakenD_I1 = BranchD_I1 & PredictedTakenD_I1 & IssueI1 & (~(BranchD_I0 & PredictedTakenD_I0));
     // FlushD_full: includes I1 branch prediction on top of the base FlushD.
     // Used for buffer management (write guard, pointer reset, d2_valid, FlushD_ifid).
     // Kept separate from FlushD to avoid a loop through IssueI1.
@@ -696,10 +810,11 @@ module datapath(
    flopr_en_flush #(12) ID_EX_CSRAddr_I0  (clk, reset, 1'b1, FlushE, CSRAddrD_I0,    CSRAddrE_I0);
    flopr_en_flush #(32) ID_EX_ImmExt_I0   (clk, reset, 1'b1, FlushE, ImmExtD_I0,     ImmExtE_I0);
    flopr_en_flush #(32) ID_EX_PCPlus4_I0  (clk, reset, 1'b1, FlushE, PCPlus4D_I0,    PCPlus4E_I0);
+   flopr_en_flush #(32) ID_EX_PCTarget_I0 (clk, reset, 1'b1, FlushE, JALTargetD_I0,  PCTargetE_I0);
    flopr_en_flush #(32) ID_EX_CSRSrc_I0   (clk, reset, 1'b1, FlushE, CSRSrcDataD_I0, CSRSrcDataE_I0);
    flopr_en_flush #(1)  ID_EX_BrPred_I0   (clk, reset, 1'b1, FlushE, PredictedTakenD_I0, PredictedTakenE_I0);
    flopr_en_flush #(1)  ID_EX_JALPredict_I0(clk, reset, 1'b1, FlushE, JALPredictD_I0,   JALPredictE_I0);
-   flopr_en_flush #(3)  ID_EX_GHR         (clk, reset, 1'b1, FlushE, GHR_snapD,         GHR_snapE);
+   flopr_en_flush #(8)  ID_EX_GHR         (clk, reset, 1'b1, FlushE, GHR_snapD,         GHR_snapE);
    flopr_en_flush #(1)  ID_EX_RegWrite_I0 (clk, reset, 1'b1, FlushE, RegWriteD_I0,   RegWriteE_I0);
    flopr_en_flush #(1)  ID_EX_ALUSrc_I0   (clk, reset, 1'b1, FlushE, ALUSrcD_I0,     ALUSrcE_I0);
    flopr_en_flush #(1)  ID_EX_MemWrite_I0 (clk, reset, 1'b1, FlushE, MemWriteD_I0,   MemWriteE_I0);
@@ -726,6 +841,7 @@ module datapath(
    flopr_en_flush #(12) ID_EX_CSRAddr_I1  (clk, reset, 1'b1, FlushE_I1, CSRAddrD_I1,    CSRAddrE_I1);
    flopr_en_flush #(32) ID_EX_ImmExt_I1   (clk, reset, 1'b1, FlushE_I1, ImmExtD_I1,     ImmExtE_I1);
    flopr_en_flush #(32) ID_EX_PCPlus4_I1  (clk, reset, 1'b1, FlushE_I1, PCPlus4D_I1,    PCPlus4E_I1);
+   flopr_en_flush #(32) ID_EX_PCTarget_I1 (clk, reset, 1'b1, FlushE_I1, BranchTargetD_I1, PCTargetE_I1);
    flopr_en_flush #(32) ID_EX_CSRSrc_I1   (clk, reset, 1'b1, FlushE_I1, CSRSrcDataD_I1, CSRSrcDataE_I1);
    flopr_en_flush #(1)  ID_EX_BrPred_I1   (clk, reset, 1'b1, FlushE_I1, PredictedTakenD_I1, PredictedTakenE_I1);
    flopr_en_flush #(1)  ID_EX_RegWrite_I1 (clk, reset, 1'b1, FlushE_I1, RegWriteD_I1,   RegWriteE_I1);
@@ -745,8 +861,7 @@ module datapath(
 
 
    // ---- I0 Execute datapath ----
-   adder pcaddbranch_I0(PCE_I0, ImmExtE_I0, PCTargetE_I0);
-
+   // PCTargetE_I0 comes from ID_EX_PCTarget_I0 (pre-computed at decode as JALTargetD_I0)
 
    // Forwarding mux for I0 SrcA — 5 sources, select from HazardUnit
    always_comb begin
@@ -778,8 +893,27 @@ module datapath(
    alu        ALU_I0        (SrcAE_I0, SrcBE_I0, ALUControlE_I0[3:0], ALUResultE_I0);
    comparator comp_I0       (SrcAE_I0, SrcBE_I0, {eq_E_I0, lt_signed_E_I0, lt_unsig_E_I0});
 
-   logic [33:0] P0_0, P1_0, P2_0, P3_0;
-   mulDiv mulDiv_I0(SrcAE_I0, SrcBE_I0, funct3E_I0, P0_0, P1_0, P2_0, P3_0);
+   // Single shared multiply unit — mux I0's operands if I0 is the multiply, else I1's
+   logic        useMulI0;
+   logic [31:0] SrcA_mul, SrcB_mul;
+   logic [2:0]  funct3_mul;
+   assign useMulI0   = (ResultSrcE_I0 == 3'b101);
+   assign SrcA_mul   = useMulI0 ? SrcAE_I0  : SrcAE_I1;
+   assign SrcB_mul   = useMulI0 ? SrcBE_I0  : SrcBE_I1;
+   assign funct3_mul = useMulI0 ? funct3E_I0 : funct3E_I1;
+
+   // Compute all 16 partial products in EX (after forwarding mux settles).
+   // Registered at EX/MEM boundary; MEM only needs the accumulation.
+   logic signed [17:0] P00_E, P01_E, P02_E, P03_E;
+   logic signed [17:0] P10_E, P11_E, P12_E, P13_E;
+   logic signed [17:0] P20_E, P21_E, P22_E, P23_E;
+   logic signed [17:0] P30_E, P31_E, P32_E, P33_E;
+   multiply multiply_ex(SrcA_mul, SrcB_mul, funct3_mul[1:0],
+                        P00_E, P01_E, P02_E, P03_E,
+                        P10_E, P11_E, P12_E, P13_E,
+                        P20_E, P21_E, P22_E, P23_E,
+                        P30_E, P31_E, P32_E, P33_E);
+
 
 
    always_comb begin
@@ -808,7 +942,7 @@ module datapath(
 
 
    // ---- I1 Execute datapath ----
-   adder pcaddbranch_I1(PCE_I1, ImmExtE_I1, PCTargetE_I1);
+   // PCTargetE_I1 comes from ID_EX_PCTarget_I1 (pre-computed at decode as BranchTargetD_I1)
 
 
    // Forwarding mux for I1 SrcA
@@ -841,8 +975,6 @@ module datapath(
    alu        ALU_I1        (SrcAE_I1, SrcBE_I1, ALUControlE_I1[3:0], ALUResultE_I1);
    comparator comp_I1       (SrcAE_I1, SrcBE_I1, {eq_E_I1, lt_signed_E_I1, lt_unsig_E_I1});
 
-   logic [33:0] P0_1, P1_1, P2_1, P3_1;
-   mulDiv mulDiv_I1(SrcAE_I1, SrcBE_I1, funct3E_I1, P0_1, P1_1, P2_1, P3_1);
 
 
    always_comb begin
@@ -871,11 +1003,10 @@ module datapath(
 
 
    // ---- Branch/Jump resolution ----
-   // I0 takes priority, EXCEPT when I0 has a not-taken branch and I1 has a jump:
-   // in that case I1's jump must still redirect the PC.
-   // If I0's branch IS taken (mispredict), I0 wins even over an I1 jump.
-   assign UseBranchI0 = JumpE_I0 || (BranchE_I0 && (~(JumpE_I1 && ~take_branchE_I0) || take_branchE_I0));
-   // assign UseBranchI0 = JumpE_I0 || BranchE_I0;
+   // I0 always wins if it's a branch or jump.
+   // I1 can never be a jump when I0 is a branch (blocked at issue), so no take_branch
+   // dependency needed here — keeps take_branchE_I0 off the PCTargetE mux select.
+   assign UseBranchI0 = JumpE_I0 || BranchE_I0;
 
    // Gate JAL-already-predicted on which lane's jump is actually being used:
     logic JALPredictE_branch;
@@ -898,26 +1029,29 @@ module datapath(
                               (PredictedTakenE_branch != BranchTakenE);
 
 
+   // BranchTakenE and BranchMispredictE are the only comparator-dependent signals.
+   // PCSrcE is derived directly from them — no further nesting on the critical path.
    always_comb begin
-       if      (BranchMispredictE &  BranchTakenE)              PCSrcE = 2'b01; // predicted NT, actually T
-       else if (BranchMispredictE & ~BranchTakenE)              PCSrcE = 2'b11; // predicted T,  actually NT
-       else if (JumpE_branch && ~ALUSrcE_branch && JALPredictE_branch) PCSrcE = 2'b00; // JAL already redirected at decode
-       else if (JumpE_branch && ~ALUSrcE_branch)                 PCSrcE = 2'b01; // JAL not predicted, redirect now
-       else if (JumpE_branch &&  ALUSrcE_branch)                 PCSrcE = 2'b10; // JALR
-       else                                                       PCSrcE = 2'b00;
+       PCSrcE = 2'b00;
+       if (BranchMispredictE)
+           PCSrcE = BranchTakenE ? 2'b01 : 2'b11; // correction: taken→PCTargetE, NT→PCPlus4E
+       else if (JumpE_branch && ~ALUSrcE_branch && ~JALPredictE_branch)
+           PCSrcE = 2'b01; // JAL not yet predicted at decode
+       else if (JumpE_branch && ALUSrcE_branch)
+           PCSrcE = 2'b10; // JALR
    end
 
 
    // GHR update (shift in outcome on every resolved branch)
-   flopr_en #(3) ghr_update(clk, reset, BranchE_branch,
-                             {GHR[1:0], BranchTakenE}, GHR);
+   flopr_en #(8) ghr_update(clk, reset, BranchE_branch,
+                             {GHR[6:0], BranchTakenE}, GHR);
 
 
    // PHT update (saturating 2-bit counter)
-   assign indexE = PCE_branch[5:2] ^ {1'b0, GHR_snapE};
+   assign indexE = PCE_branch[9:2] ^ GHR_snapE;
    always_ff @(posedge clk, posedge reset) begin
        if (reset) begin
-           for (int i = 0; i < 16; i++)
+           for (int i = 0; i < 256; i++)
                PHT[i] <= 2'b01;           // reset to weakly not-taken
        end else if (BranchE_branch) begin
            if (BranchTakenE) begin
@@ -937,10 +1071,23 @@ module datapath(
    // I0
    flopr_en #(32) EX_MEM_PCPlus4_I0  (clk, reset, 1'b1, PCPlus4E_I0,       PCPlus4M_I0);
    flopr_en #(32) EX_MEM_ALUResult_I0 (clk, reset, 1'b1, ALUResultPipeE_I0, ALUResultM_I0);
-   flopr_en #(34) EX_MEM_Mul_I0_P0(clk, reset, 1'b1, P0_0, P0_M_I0);
-   flopr_en #(34) EX_MEM_Mul_I0_P1(clk, reset, 1'b1, P1_0, P1_M_I0);
-   flopr_en #(34) EX_MEM_Mul_I0_P2(clk, reset, 1'b1, P2_0, P2_M_I0);
-   flopr_en #(34) EX_MEM_Mul_I0_P3(clk, reset, 1'b1, P3_0, P3_M_I0);
+   // Register partial products at EX/MEM — MEM only needs to accumulate
+   flopr_en #(18) EX_MEM_P00(clk, reset, 1'b1, P00_E, P00_M);
+   flopr_en #(18) EX_MEM_P01(clk, reset, 1'b1, P01_E, P01_M);
+   flopr_en #(18) EX_MEM_P02(clk, reset, 1'b1, P02_E, P02_M);
+   flopr_en #(18) EX_MEM_P03(clk, reset, 1'b1, P03_E, P03_M);
+   flopr_en #(18) EX_MEM_P10(clk, reset, 1'b1, P10_E, P10_M);
+   flopr_en #(18) EX_MEM_P11(clk, reset, 1'b1, P11_E, P11_M);
+   flopr_en #(18) EX_MEM_P12(clk, reset, 1'b1, P12_E, P12_M);
+   flopr_en #(18) EX_MEM_P13(clk, reset, 1'b1, P13_E, P13_M);
+   flopr_en #(18) EX_MEM_P20(clk, reset, 1'b1, P20_E, P20_M);
+   flopr_en #(18) EX_MEM_P21(clk, reset, 1'b1, P21_E, P21_M);
+   flopr_en #(18) EX_MEM_P22(clk, reset, 1'b1, P22_E, P22_M);
+   flopr_en #(18) EX_MEM_P23(clk, reset, 1'b1, P23_E, P23_M);
+   flopr_en #(18) EX_MEM_P30(clk, reset, 1'b1, P30_E, P30_M);
+   flopr_en #(18) EX_MEM_P31(clk, reset, 1'b1, P31_E, P31_M);
+   flopr_en #(18) EX_MEM_P32(clk, reset, 1'b1, P32_E, P32_M);
+   flopr_en #(18) EX_MEM_P33(clk, reset, 1'b1, P33_E, P33_M);
    flopr_en #(32) EX_MEM_WriteData_I0 (clk, reset, 1'b1, WriteDataE_I0,     WriteDataM_I0);
    flopr_en #(5)  EX_MEM_Rd_I0        (clk, reset, 1'b1, RdE_I0,            RdM_I0);
    flopr_en #(3)  EX_MEM_funct3_I0    (clk, reset, 1'b1, funct3E_I0,        funct3M_I0);
@@ -957,10 +1104,8 @@ module datapath(
    // I1 TODO: check if flush logic is correct
    flopr_en_flush #(32) EX_MEM_PCPlus4_I1  (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), PCPlus4E_I1,       PCPlus4M_I1);
    flopr_en_flush #(32) EX_MEM_ALUResult_I1 (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), ALUResultPipeE_I1, ALUResultM_I1);
-   flopr_en_flush #(34) EX_MEM_Mul_I1_P0(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P0_1, P0_M_I1);
-   flopr_en_flush #(34) EX_MEM_Mul_I1_P1(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P1_1, P1_M_I1);
-   flopr_en_flush #(34) EX_MEM_Mul_I1_P2(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P2_1, P2_M_I1);
-   flopr_en_flush #(34) EX_MEM_Mul_I1_P3(clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), P3_1, P3_M_I1);
+   // I1 mul registers: flopr_en (no flush gate on data path); correctness maintained by
+   // RegWriteM_I1=0 when I1 is flushed, so stale values are never written to the register file.
    flopr_en_flush #(32) EX_MEM_WriteData_I1 (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), WriteDataE_I1,     WriteDataM_I1);
    flopr_en_flush #(5)  EX_MEM_Rd_I1        (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), RdE_I1,            RdM_I1);
    flopr_en_flush #(3)  EX_MEM_funct3_I1    (clk, reset, 1'b1, UseBranchI0 & (PCSrcE != 2'b00), funct3E_I1,        funct3M_I1);
@@ -1031,21 +1176,27 @@ module datapath(
                              funct3M_I0, newCSRWriteDataM_I0);
 
 
-    logic signed [34:0] P12M_I0;
-    assign P12M_I0 = {P1_M_I0[33], P1_M_I0} + {P2_M_I0[33], P2_M_I0};
-
-    logic signed [63:0] op_hi_I0, op_lo_I0;
-
-    assign op_hi_I0 = {{30{P0_M_I0[33]}}, P0_M_I0};
-
-    assign op_lo_I0 = ({{13{P12M_I0[34]}}, P12M_I0} << 16)
-                    + {{30{P3_M_I0[33]}},  P3_M_I0};
-
+    // Accumulate 16 registered partial products into 64-bit product (EX computed, MEM accumulates).
     logic [63:0] origProductM_0;
-    assign origProductM_0 = (op_hi_I0 << 32) + op_lo_I0;
+    assign origProductM_0 =
+        {{46{P00_M[17]}}, P00_M}        +  // shift  0
+        {{38{P01_M[17]}}, P01_M, 8'b0}  +  // shift  8
+        {{38{P10_M[17]}}, P10_M, 8'b0}  +  // shift  8
+        {{30{P02_M[17]}}, P02_M, 16'b0} +  // shift 16
+        {{30{P11_M[17]}}, P11_M, 16'b0} +  // shift 16
+        {{30{P20_M[17]}}, P20_M, 16'b0} +  // shift 16
+        {{22{P03_M[17]}}, P03_M, 24'b0} +  // shift 24
+        {{22{P12_M[17]}}, P12_M, 24'b0} +  // shift 24
+        {{22{P21_M[17]}}, P21_M, 24'b0} +  // shift 24
+        {{22{P30_M[17]}}, P30_M, 24'b0} +  // shift 24
+        {{14{P13_M[17]}}, P13_M, 32'b0} +  // shift 32
+        {{14{P22_M[17]}}, P22_M, 32'b0} +  // shift 32
+        {{14{P31_M[17]}}, P31_M, 32'b0} +  // shift 32
+        {{ 6{P23_M[17]}}, P23_M, 40'b0} +  // shift 40
+        {{ 6{P32_M[17]}}, P32_M, 40'b0} +  // shift 40
+        {P33_M[15:0], 48'b0};               // shift 48
 
     logic [31:0] productM_0;
-
     always_comb begin
         case (funct3M_I0)
             3'b000: productM_0 = origProductM_0[31:0];
@@ -1053,21 +1204,10 @@ module datapath(
         endcase
     end
 
-    logic signed [34:0] P12M_I1;
-    assign P12M_I1 = {P1_M_I1[33], P1_M_I1} + {P2_M_I1[33], P2_M_I1};
-
-    logic signed [63:0] op_hi_I1, op_lo_I1;
-
-    assign op_hi_I1 = {{30{P0_M_I1[33]}}, P0_M_I1};
-
-    assign op_lo_I1 = ({{13{P12M_I1[34]}}, P12M_I1} << 16)
-                    + {{30{P3_M_I1[33]}},  P3_M_I1};
-
     logic [63:0] origProductM_1;
-    assign origProductM_1 = (op_hi_I1 << 32) + op_lo_I1;
+    assign origProductM_1 = origProductM_0;  // I0 and I1 share the same multiply unit
 
     logic [31:0] productM_1;
-
     always_comb begin
         case (funct3M_I1)
             3'b000: productM_1 = origProductM_1[31:0];
@@ -1083,7 +1223,7 @@ module datapath(
        PCPlus4M_I0,     // 010 return address
        ALUResultM_I0,   // 011 LUI  (folded)
        ALUResultM_I0,   // 100 AUIPC(folded)
-       productM_0,   // 101 ALUResultM_I0
+       32'h0,   // 101 ALUResultM_I0
        oldCSRReadDataM_I0,           // 110 CSR  (block; forward from WB instead)
        ResultSrcM_I0,
        ResultM_I0
@@ -1096,7 +1236,7 @@ module datapath(
        PCPlus4M_I1,     // 010
        ALUResultM_I1,   // 011
        ALUResultM_I1,   // 100
-       productM_1,   // 101 ALUResultM_I1
+       32'h0,   // 101 ALUResultM_I1
        32'h0,           // 110 (I1 never does CSR)
        ResultSrcM_I1,
        ResultM_I1
