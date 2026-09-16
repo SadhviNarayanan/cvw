@@ -68,6 +68,9 @@ EXT_MEM_RANGE       64'h3FFFFFFF
 deriv fpgavcu108 fpga
 EXT_MEM_RANGE       64'h7FFFFFFF
 
+deriv fpganexysa7 fpga
+EXT_MEM_RANGE       64'h07FFFFFF
+
 # temporary spitest configuration
 deriv spitest rv64gc
 UNCORE_RAM_RANGE    64'h0FFFFFFF
@@ -539,10 +542,6 @@ deriv way_4_4096_256_rv64gc way_4_4096_512_rv64gc
 DCACHE_LINELENINBITS 32'd256
 ICACHE_LINELENINBITS 32'd256
 
-deriv way_4_4096_1024_rv64gc way_4_4096_512_rv64gc
-DCACHE_LINELENINBITS 32'd1024
-ICACHE_LINELENINBITS 32'd1024
-
 # TLB Size variants
 
 deriv tlb2_rv32gc rv32gc
@@ -586,6 +585,41 @@ ZALRSC_SUPPORTED    0
 
 deriv zalrsc_rv64gc rv64gc
 ZAAMO_SUPPORTED     0
+
+# Zicbom and Zicboz are independent extensions, so cover each one without the other.
+# zicbom_* also covers Zaamo without Zicboz, because ZAAMO_SUPPORTED stays on.
+deriv zicbom_rv32gc rv32gc
+ZICBOZ_SUPPORTED    0
+
+deriv zicboz_rv32gc rv32gc
+ZICBOM_SUPPORTED    0
+
+deriv zicbom_rv64gc rv64gc
+ZICBOZ_SUPPORTED    0
+
+deriv zicboz_rv64gc rv64gc
+ZICBOM_SUPPORTED    0
+
+# Only mhpmcounter3 and mhpmcounter4 are implemented.  mhpmcounter5-31 and their event
+# selectors must still read as zero rather than trapping, so this covers the upper counter
+# decode that a full 32-counter configuration cannot reach.
+deriv counters5_rv64gc rv64gc
+COUNTERS            12'd5
+
+# All mhpmcounters are read-only zero
+deriv counters3_rv64gc rv64gc
+COUNTERS            12'd3
+
+# Only mhpmcounter3-4 are implemented, and are not accessible from user mode
+deriv counters5_nohpm_rv64gc rv64gc
+ZIHPM_SUPPORTED     0
+COUNTERS            12'd5
+
+# Only mhpmcounter3-4 are implemented, and no coutners or hpms are not accessible from user mode
+deriv counters5_nocntr_rv32gc rv32gc
+ZICNTR_SUPPORTED     0
+ZIHPM_SUPPORTED     0
+COUNTERS            12'd5
 
 deriv zba_rv32gc rv32gc
 ZBA_SUPPORTED     1
@@ -1457,6 +1491,7 @@ GPIO_SUPPORTED      0
 UART_SUPPORTED      0
 PLIC_SUPPORTED      0
 SPI_SUPPORTED       0
+PWM_SUPPORTED       0
 
 deriv sv39 rv64gc
 SV48_SUPPORTED      0
