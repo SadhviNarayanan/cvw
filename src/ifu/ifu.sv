@@ -106,6 +106,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   localparam [31:0]            nop = 32'h00000013;                       // instruction for NOP
   localparam            LINELEN = P.ICACHE_SUPPORTED ? P.ICACHE_LINELENINBITS : P.XLEN;
+  localparam            FETCHWIDTH = 64;                                 // Two 32-bit instruction slots fetched per cycle for superscalar
 
   logic [P.XLEN-1:0]           PCNextF;                                  // Next PCF, selected from Branch predictor, Privilege, or PC+2/4
   logic [P.XLEN-1:0]           PC1NextF;                                 // Branch predictor next PCF
@@ -122,8 +123,10 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN+1:0]           PCFExt;
 
   logic [31:0]                 IROMInstrF;                               // Instruction from the IROM
-  logic [31:0]                 ICacheInstrF;                             // Instruction from the I$
-  logic [31:0]                 InstrRawF;                                // Instruction from the IROM, I$, or bus
+  logic [FETCHWIDTH-1:0]       ICacheInstrF;                             // Two instruction slots from the I$: [31:0] at PCSpillF, [63:32] the next 32 bits
+  logic [FETCHWIDTH-1:0]       FetchDataF;                               // Fetch window from the IROM, I$, or bus: [31:0] instr at PCSpillF, [63:32] next 32 bits
+  logic [31:0]                 InstrRawF;                                // First fetched instruction (slot 0) from the IROM, I$, or bus
+  logic [31:0]                 Instr2RawF;                               // Second fetched instruction (slot 1); not yet consumed downstream
   logic                        CompressedF, CompressedE;                 // The fetched instruction is compressed
   logic [31:0]                 PostSpillInstrRawF;                       // Fetch instruction after merge two halves of spill
   logic [31:0]                 InstrRawD;                                // Non-decompressed instruction in the Decode stage
@@ -144,7 +147,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic                        SelIROM;                                  // PMA indicates instruction address is in the IROM
   logic [15:0]                 InstrRawE, InstrRawM;
   logic [LINELEN-1:0]          FetchBuffer;
-  logic [31:0]                 ShiftUncachedInstr;
+  logic [FETCHWIDTH-1:0]       ShiftUncachedInstr;                       // Uncached fetch window; slot 1 has an instruction/value only when the bus is 64 bits
   logic                        ITLBMissF;
   logic                        InstrUpdateAF;                            // ITLB hit needs to update dirty or access bits
   logic                        IFUFaultF;                                // Fetch failed the PMA or PMP check, so it must not access the cache or bus
@@ -286,7 +289,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
       assign CacheRWF = ~ITLBMissF & CacheableF & ~SelIROM & ~IFUFaultF ? IFURWF : '0;
       cache #(.P(P), .PA_BITS(P.PA_BITS), .LINELEN(P.ICACHE_LINELENINBITS),
               .NUMSETS(P.ICACHE_WAYSIZEINBYTES*8/P.ICACHE_LINELENINBITS),
-              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(32), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
+              .NUMWAYS(P.ICACHE_NUMWAYS), .LOGBWPL(AHBWLOGBWPL), .WORDLEN(FETCHWIDTH), .MUXINTERVAL(16), .READ_ONLY_CACHE(1))
       icache(.clk, .reset, .FlushStage(FlushD), .Stall(GatedStallD),
              .FetchBuffer, .CacheBusAck(ICacheBusAck),
              .CacheBusAdr(ICacheBusAdr), .CacheStall(ICacheStallF),
@@ -313,8 +316,8 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
             .BusRW, .Stall(GatedStallD),
             .BusStall, .BusCommitted(BusCommittedF));
 
-      mux3 #(32) UnCachedDataMux(.d0(ICacheInstrF), .d1(ShiftUncachedInstr), .d2(IROMInstrF),
-                                 .s({SelIROM, ~CacheableF}), .y(InstrRawF[31:0]));
+      mux3 #(FETCHWIDTH) UnCachedDataMux(.d0(ICacheInstrF), .d1(ShiftUncachedInstr), .d2({32'b0, IROMInstrF}),
+                                         .s({SelIROM, ~CacheableF}), .y(FetchDataF));
     end else begin : passthrough
       assign IFUHADDR = PCPF;
       logic [1:0] BusRW;
@@ -327,23 +330,28 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
         .Stall(GatedStallD), .BusStall, .BusCommitted(BusCommittedF), .FetchBuffer(FetchBuffer));
 
       assign CacheCommittedF = '0;
-      if(P.IROM_SUPPORTED) mux2 #(32) UnCachedDataMux2(ShiftUncachedInstr, IROMInstrF, SelIROM, InstrRawF);
-      else assign InstrRawF = ShiftUncachedInstr;
+      if(P.IROM_SUPPORTED) mux2 #(FETCHWIDTH) UnCachedDataMux2(ShiftUncachedInstr, {32'b0, IROMInstrF}, SelIROM, FetchDataF);
+      else assign FetchDataF = ShiftUncachedInstr;
       assign IFUHBURST = 3'b0;
       assign {ICacheMiss, ICacheAccess, ICacheStallF} = '0;
     end
 
-    // mux between the alignments of uncached reads.
-    if(P.XLEN == 64) mux4 #(32) UncachedShiftInstrMux(FetchBuffer[32-1:0], FetchBuffer[48-1:16],
-                                                      FetchBuffer[64-1:32], {16'b0, FetchBuffer[64-1:48]},
-                                                      PCSpillF[2:1], ShiftUncachedInstr);
-    else mux2 #(32) UncachedShiftInstrMux(FetchBuffer[32-1:0], {16'b0, FetchBuffer[32-1:16]}, PCSpillF[1], ShiftUncachedInstr);
+    // mux between the alignments of uncached reads.  An uncached fetch is a single bus beat, so the
+    // window is shifted so the halfword at PCSpillF lands at bit 0 and zero-filled above the beat.
+    if(P.XLEN == 64) mux4 #(FETCHWIDTH) UncachedShiftInstrMux(FetchBuffer[64-1:0], {16'b0, FetchBuffer[64-1:16]},
+                                                              {32'b0, FetchBuffer[64-1:32]}, {48'b0, FetchBuffer[64-1:48]},
+                                                              PCSpillF[2:1], ShiftUncachedInstr);
+    else mux2 #(FETCHWIDTH) UncachedShiftInstrMux({32'b0, FetchBuffer[32-1:0]}, {48'b0, FetchBuffer[32-1:16]}, PCSpillF[1], ShiftUncachedInstr);
   end else begin : nobus // block: bus
     assign {IFUHADDR, IFUHWRITE, IFUHSIZE, IFUHBURST, IFUHTRANS,
             BusStall, CacheCommittedF, BusCommittedF, FetchBuffer} = '0;
     assign {ICacheStallF, ICacheMiss, ICacheAccess} = '0;
-    assign InstrRawF = IROMInstrF;
+    assign FetchDataF = {32'b0, IROMInstrF};
   end
+
+  // Split the fetch window into its two instruction slots.  Only slot 0 continues to Decode in this step.
+  assign InstrRawF  = FetchDataF[31:0];
+  assign Instr2RawF = FetchDataF[63:32];
 
   assign IFUCacheBusStallF = ICacheStallF | BusStall;
   // The fetch side owns the stall for an unresolved ITLB miss / A update: the pipeline holds until the walker

@@ -739,6 +739,41 @@ module testbench;
                 InstrM,  InstrW,
                 InstrFName, InstrDName, InstrEName, InstrMName, InstrWName);
 
+  // Superscalar step 1: the IFU fetches a 64-bit window (two instruction slots) but only slot 0 goes to
+  // Decode.  Nothing consumes slot 1 yet, so check it here: when execution is sequential, the instruction
+  // accepted into Decode must equal the slot-1 bits of the previously accepted fetch window.  A second slot
+  // only exists for cached, non-IROM, non-spill fetches whose whole window lies within one cache line.
+  if (P.ICACHE_SUPPORTED) begin : fetch2check
+    localparam OFFSETLEN = $clog2(P.ICACHE_LINELENINBITS/8);
+    logic              AcceptF;                 // F-stage instruction is being loaded into Decode this cycle
+    logic              Slot1ValidF, Slot1ValidPrev;
+    logic [P.XLEN-1:0] PCPrev, PCExpected;
+    logic [63:0]       FetchDataPrev;
+    logic              CompressedPrev;
+    logic [31:0]       ExpectedInstr;
+    assign AcceptF = ~reset & ~dut.core.ifu.StallD & ~dut.core.ifu.FlushD;
+    assign Slot1ValidF = dut.core.ifu.CacheableF & ~dut.core.ifu.SelIROM & (dut.core.ifu.PCSpillF == dut.core.ifu.PCF) &
+                         (dut.core.ifu.PCF[OFFSETLEN-1:0] <= (P.ICACHE_LINELENINBITS/8 - 8));
+    always_ff @(posedge clk)
+      if (AcceptF) begin
+        PCPrev         <= dut.core.ifu.PCF;
+        FetchDataPrev  <= dut.core.ifu.FetchDataF;
+        CompressedPrev <= dut.core.ifu.CompressedF;
+        Slot1ValidPrev <= Slot1ValidF;
+      end else if (dut.core.ifu.CSRWriteFenceM | dut.core.ifu.InvalidateICacheM)
+        Slot1ValidPrev <= 1'b0;                 // memory may have changed (fence.i); previous window is stale
+    assign PCExpected    = PCPrev + (CompressedPrev ? 2 : 4);
+    assign ExpectedInstr = CompressedPrev ? FetchDataPrev[47:16] : FetchDataPrev[63:32];
+    always_ff @(posedge clk)
+      if (AcceptF & Slot1ValidPrev & Slot1ValidF & (dut.core.ifu.PCF == PCExpected))
+        if (dut.core.ifu.CompressedF ? (ExpectedInstr[15:0] != dut.core.ifu.PostSpillInstrRawF[15:0])
+                                     : (ExpectedInstr       != dut.core.ifu.PostSpillInstrRawF)) begin
+          $error("Fetch slot 1 mismatch: window at PC %h predicted %h for PC %h but fetch returned %h",
+                 PCPrev, ExpectedInstr, dut.core.ifu.PCF, dut.core.ifu.PostSpillInstrRawF);
+          $fatal(1);
+        end
+  end
+
   // watch for problems such as lockup, reading uninitialized memory, bad configs
 `ifdef MEMPIPE_PROBE
   `include "mempipeprobe.svh"
