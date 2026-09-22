@@ -61,6 +61,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0]    TrapVectorM,                              // Trap vector, from privileged unit
   input  logic                 RetM, TrapM,                              // return instruction, or trap
   output logic [31:0]          InstrD,                                   // The decoded instruction in Decode stage
+  output logic [31:0]          Instr2D,                                  // Second decoded instruction in Decode stage (superscalar slot 1)
   output logic [31:0]          InstrM,                                   // The decoded instruction in Memory stage
   output logic [31:0]          InstrOrigM,                               // Original compressed or uncompressed instruction in Memory stage for Illegal Instruction XTVAL
   output logic [P.XLEN-1:0]    PCM,                                      // Memory stage instruction address
@@ -126,11 +127,19 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [FETCHWIDTH-1:0]       ICacheInstrF;                             // Two instruction slots from the I$: [31:0] at PCSpillF, [63:32] the next 32 bits
   logic [FETCHWIDTH-1:0]       FetchDataF;                               // Fetch window from the IROM, I$, or bus: [31:0] instr at PCSpillF, [63:32] next 32 bits
   logic [31:0]                 InstrRawF;                                // First fetched instruction (slot 0) from the IROM, I$, or bus
-  logic [31:0]                 Instr2RawF;                               // Second fetched instruction (slot 1); not yet consumed downstream
   logic                        CompressedF, CompressedE;                 // The fetched instruction is compressed
   logic [31:0]                 PostSpillInstrRawF;                       // Fetch instruction after merge two halves of spill
   logic [31:0]                 InstrRawD;                                // Non-decompressed instruction in the Decode stage
   logic                        IllegalIEUInstrD;                         // IEU Instruction (regular or compressed) is not good
+
+  // Second instruction slot (superscalar).  Slot 1 is the instruction following slot 0 in the fetch window.
+  // It is decoded in parallel with slot 0 but not yet issued to Execute.
+  logic [31:0]                 Instr2RawF;                               // Slot 1 raw instruction, aligned to start at bit 0
+  logic                        Instr2ValidF;                             // Slot 1 holds a complete instruction from the I$
+  logic [31:0]                 Instr2RawD;                               // Slot 1 raw instruction in the Decode stage
+  logic [P.XLEN-1:0]           Instr2PCD;                                // Slot 1 instruction address in the Decode stage
+  logic                        Instr2ValidD;                             // Slot 1 in Decode holds a complete instruction
+  logic                        SelSpillF;                                // Fetching the second half of an instruction that spills across a line
 
   logic [1:0]                  IFURWF;                                   // IFU alreays read IFURWF = 10
   logic [31:0]                 InstrE;                                   // Instruction in the Execution stage
@@ -164,7 +173,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   if(P.ZCA_SUPPORTED) begin : Spill
     logic [P.XLEN-1:0] PCSpillD, PCSpillE;
     logic [P.XLEN-1:0] PCIncrM;
-    logic              SelSpillF, SelSpillD, SelSpillE, SelSpillM;
+    logic              SelSpillD, SelSpillE, SelSpillM;
     logic              FirstHalfFaultF;
     spill #(P) spill(.clk, .reset, .StallF, .FlushD, .PCF, .PCPlus4F, .PCNextF, .InstrRawF,  .CacheableF,
       .InstrPageFaultF(InstrPageFaultRawF), .InstrAccessFaultF(InstrAccessFaultRawF),
@@ -182,7 +191,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign PCSpillNextF = PCNextF;
     assign PCSpillF = PCF;
     assign PostSpillInstrRawF = InstrRawF;
-    assign {SelSpillNextF, CompressedF} = '0;
+    assign {SelSpillNextF, SelSpillF, CompressedF} = '0;
     assign PCSpillM = PCM;
     assign InstrPageFaultF = InstrPageFaultRawF;
     assign InstrAccessFaultF = InstrAccessFaultRawF;
@@ -349,9 +358,30 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
     assign FetchDataF = {32'b0, IROMInstrF};
   end
 
-  // Split the fetch window into its two instruction slots.  Only slot 0 continues to Decode in this step.
+  // Split the fetch window into its two instruction slots.
+  // Slot 0 is the instruction at PCSpillF; the I$ aligns it to bit 0 at halfword granularity.
+  // Slot 1 follows it: it starts at bit 16 if slot 0 is compressed, else at bit 32.
+  // Each slot is then expanded by its own decompressor in the Decode stage.
   assign InstrRawF  = FetchDataF[31:0];
-  assign Instr2RawF = FetchDataF[63:32];
+  mux2 #(32) instr2mux(FetchDataF[63:32], FetchDataF[47:16], CompressedF, Instr2RawF);
+
+  // Slot 0 is always complete (the spill logic fetches a second line when it straddles one).
+  // Slot 1 has no spill yet, so it is only valid when it comes from the I$ and lies entirely within
+  // the current cache line; past the end of the line the window is zero-padded.  Uncached, IROM, and
+  // spill fetches deliver a single instruction.
+  if (P.ICACHE_SUPPORTED) begin : instr2valid
+    localparam LINEBYTES = P.ICACHE_LINELENINBITS/8;
+    localparam OFFSETLEN = $clog2(LINEBYTES);
+    logic [OFFSETLEN:0] Instr2OffsetF;                                    // Byte offset of slot 1 within the line
+    logic [OFFSETLEN:0] Instr2EndF;                                       // Byte offset just past the end of slot 1
+    logic               Compressed2F;                                     // Slot 1 is a 16-bit instruction
+    assign Instr2OffsetF = {1'b0, PCF[OFFSETLEN-1:0]} + (CompressedF ? 'd2 : 'd4);
+    assign Compressed2F  = ~&Instr2RawF[1:0];
+    assign Instr2EndF    = Instr2OffsetF + (Compressed2F ? 'd2 : 'd4);
+    assign Instr2ValidF  = CacheableF & ~SelIROM & ~SelSpillF & (Instr2EndF <= LINEBYTES[OFFSETLEN:0]);
+  end else begin : instr2valid
+    assign Instr2ValidF = 1'b0;
+  end
 
   assign IFUCacheBusStallF = ICacheStallF | BusStall;
   // The fetch side owns the stall for an unresolved ITLB miss / A update: the pipeline holds until the walker
@@ -361,6 +391,12 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   assign GatedStallD = StallD & ~SelSpillNextF;
 
   flopenl #(32) AlignedInstrRawDFlop(clk, reset | FlushD, ~StallD, PostSpillInstrRawF, nop, InstrRawD);
+
+  // Slot 1 Fetch -> Decode registers, mirroring slot 0's (instruction, PC) plus a valid bit.
+  // Slot 1's PC is PCPlus2or4F: the address right after slot 0.
+  flopenl  #(32)     AlignedInstr2RawDFlop(clk, reset | FlushD, ~StallD, Instr2RawF, nop, Instr2RawD);
+  flopenrc #(P.XLEN) Instr2PCDReg(clk, reset, FlushD, ~StallD, PCPlus2or4F, Instr2PCD);
+  flopenrc #(1)      Instr2ValidDReg(clk, reset, FlushD, ~StallD, Instr2ValidF, Instr2ValidD);
 
   ////////////////////////////////////////////////////////////////////////////////////////////////
   // PCNextF logic
@@ -431,12 +467,15 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
 
   // expand 16-bit compressed instructions to 32 bits
   if (P.ZCA_SUPPORTED) begin : decomp
-    logic IllegalCompInstrD;
+    logic IllegalCompInstrD, IllegalCompInstr2D;
     decompress #(P) decomp(.InstrRawD, .InstrD, .IllegalCompInstrD);
     assign IllegalIEUInstrD = IllegalBaseInstrD | IllegalCompInstrD; // illegal if bad 32 or 16-bit instr
+    // Slot 1 gets its own decompressor.  Its illegal flag is not used until slot 1 can issue.
+    decompress #(P) decomp2(.InstrRawD(Instr2RawD), .InstrD(Instr2D), .IllegalCompInstrD(IllegalCompInstr2D));
   end else begin : decomp
     assign InstrD = InstrRawD;
     assign IllegalIEUInstrD = IllegalBaseInstrD;
+    assign Instr2D = Instr2RawD;
   end
   assign IllegalIEUFPUInstrD = IllegalIEUInstrD & (IllegalFPUInstrD | !P.F_SUPPORTED);
 

@@ -31,6 +31,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   input  logic              clk, reset,
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
+  input  logic [31:0]       Instr2D,                         // Second instruction (superscalar slot 1), decoded but not issued
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
   input  logic [3:0]        ENVCFG_CBE,                      // Cache block operation enables
   input  logic              IllegalIEUFPUInstrD,             // Illegal instruction
@@ -100,6 +101,15 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Forwarding signals
   logic [4:0] Rs1D, Rs2D;
   logic [4:0] Rs2E;                                          // Source registers
+
+  // Slot 1 (superscalar) Decode-stage outputs: the same signals the controller produces in D for slot 0.
+  // Slot 1 is decoded alongside slot 0 but does not issue yet, so these are observed by the testbench only.
+  logic [4:0] Rs1_2D, Rs2_2D;                                // Slot 1 source registers
+  logic [2:0] ImmSrc2D;                                      // Slot 1 immediate format
+  logic       IllegalBaseInstr2D;                            // Slot 1 is an illegal base instruction
+  logic       Branch2D, Jump2D;                              // Slot 1 is a branch / jump
+  logic       InstrValid2D;                                  // Slot 1 controller valid bit (not yet qualified by the IFU's Instr2ValidD)
+  logic       StructuralStall2D, LoadStall2D, StoreStall2D;  // Slot 1 hazards against the instruction in Execute
   logic [1:0] ForwardAE, ForwardBE;                          // Select signals for forwarding multiplexers
   logic       RegWriteW;                                     // Register will be written in Writeback stage
   logic       BranchSignedE;                                 // Branch does signed comparison on operands
@@ -120,8 +130,27 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .StallW, .FlushW, .RegWriteW, .IntDivW, .ResultSrcW, .CSRWriteFenceM, .InvalidateICacheM,
     .RdW, .RdE, .RdM);
 
+  // Slot 1 controller (superscalar).  A second copy of the controller decodes Instr2D in the Decode stage.
+  // Only its Decode-stage outputs are used; slot 1 does not issue, so its Execute/Memory/Writeback
+  // outputs are left unconnected and its Execute-stage feedback inputs are tied off.
+  controller #(P) c2(
+    .clk, .reset, .StallD, .FlushD, .InstrD(Instr2D), .STATUS_FS, .ENVCFG_CBE, .ImmSrcD(ImmSrc2D),
+    .IllegalIEUFPUInstrD(1'b0), .IllegalBaseInstrD(IllegalBaseInstr2D),
+    .StructuralStallD(StructuralStall2D), .LoadStallD(LoadStall2D), .StoreStallD(StoreStall2D),
+    .Rs1D(Rs1_2D), .Rs2D(Rs2_2D), .Rs2E(),
+    .StallE, .FlushE, .FlagsE(2'b00), .FWriteIntE(1'b0),
+    .PCSrcE(), .ALUSrcAE(), .ALUSrcBE(), .ALUResultSrcE(), .ALUSelectE(),
+    .Funct3E(), .Funct7E(), .IntDivE(), .W64E(), .UW64E(), .SubArithE(), .BranchD(Branch2D), .BranchE(), .JumpD(Jump2D), .JumpE(),
+    .BranchSignedE(), .BSelectE(), .ZBBSelectE(), .BALUControlE(), .BMUActiveE(), .CZeroE(), .MDUActiveE(),
+    .FCvtIntE(1'b0), .ForwardAE(), .ForwardBE(), .CMOpM(), .IFUPrefetchE(), .LSUPrefetchM(),
+    .StallM, .FlushM, .MemRWE(), .MemRWM(), .CSRReadM(), .CSRWriteM(), .PrivilegedM(), .AtomicM(), .Funct3M(),
+    .FlushDCacheM(), .InstrValidM(), .InstrValidE(), .InstrValidD(InstrValid2D), .FWriteIntM(),
+    .StallW, .FlushW, .RegWriteW(), .IntDivW(), .ResultSrcW(), .CSRWriteFenceM(), .InvalidateICacheM(),
+    .RdW(), .RdE(), .RdM());
+
   datapath #(P) dp(
     .clk, .reset, .ImmSrcD, .InstrD, .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
+    .ImmSrc2D, .Instr2D, .Rs1_2D, .Rs2_2D,                                                          // slot 1
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,

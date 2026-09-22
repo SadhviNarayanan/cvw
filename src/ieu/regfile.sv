@@ -32,8 +32,10 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   input  logic             clk, reset,
   input  logic             we3,                 // Write enable
   input  logic [4:0]       a1, a2, a3,          // Source registers to read (a1, a2), destination register to write (a3)
+  input  logic [4:0]       a4, a5,              // Source registers to read for the second instruction slot (superscalar)
   input  logic [XLEN-1:0]  wd3,                 // Write data for port 3
-  output logic [XLEN-1:0]  rd1, rd2);           // Read data for ports 1, 2
+  output logic [XLEN-1:0]  rd1, rd2,            // Read data for ports 1, 2
+  output logic [XLEN-1:0]  rd4, rd5);           // Read data for ports 4, 5 (second instruction slot)
 
   localparam NUMREGS = E_SUPPORTED ? 16 : 32;   // only 16 registers in E mode
 
@@ -55,4 +57,6 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
 
   assign rd1 = (a1 != 0) ? rf[a1] : 0;
   assign rd2 = (a2 != 0) ? rf[a2] : 0;
+  assign rd4 = (a4 != 0) ? rf[a4] : 0;
+  assign rd5 = (a5 != 0) ? rf[a5] : 0;
 endmodule

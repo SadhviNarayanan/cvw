@@ -34,6 +34,9 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        ImmSrcD,                 // Selects type of immediate extension
   input  logic [31:0]       InstrD,                  // Instruction in Decode stage
   input  logic [4:0]        Rs1D, Rs2D, Rs2E,             // Source registers
+  input  logic [2:0]        ImmSrc2D,                // Slot 1 (superscalar): immediate format
+  input  logic [31:0]       Instr2D,                 // Slot 1: instruction in Decode stage
+  input  logic [4:0]        Rs1_2D, Rs2_2D,          // Slot 1: source registers
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -80,6 +83,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Decode stage signals
   logic [P.XLEN-1:0] R1D, R2D;                       // Read data from Rs1 (RD1), Rs2 (RD2)
   logic [P.XLEN-1:0] ImmExtD;                        // Extended immediate in Decode stage
+  logic [P.XLEN-1:0] R1_2D, R2_2D;                   // Slot 1: read data from Rs1_2D, Rs2_2D (not issued yet)
+  logic [P.XLEN-1:0] ImmExt2D;                       // Slot 1: extended immediate in Decode stage
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
   logic [P.XLEN-1:0] ImmExtE;                        // Extended immediate in Execute stage
@@ -97,8 +102,9 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
 
   // Decode stage
-  regfile #(P.XLEN, P.E_SUPPORTED) regf(clk, reset, RegWriteW, Rs1D, Rs2D, RdW, ResultW, R1D, R2D);
+  regfile #(P.XLEN, P.E_SUPPORTED) regf(clk, reset, RegWriteW, Rs1D, Rs2D, RdW, Rs1_2D, Rs2_2D, ResultW, R1D, R2D, R1_2D, R2_2D);
   extend #(P)        ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
+  extend #(P)        ext2(.InstrD(Instr2D[31:7]), .ImmSrcD(ImmSrc2D), .ImmExtD(ImmExt2D));   // slot 1
 
   // Execute stage pipeline register and logic
   flopenrc #(P.XLEN) RD1EReg(clk, reset, FlushE, ~StallE, R1D, R1E);

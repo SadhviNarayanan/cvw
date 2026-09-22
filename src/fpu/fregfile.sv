@@ -30,9 +30,11 @@
 module fregfile #(parameter FLEN) (
   input logic              clk, reset,
   input logic              we4,             // write enable
-  input logic [4:0]        a1, a2, a3, a4,  // addresses
+  input logic [4:0]        a1, a2, a3, a4,  // addresses: read a1-a3, write a4
+  input logic [4:0]        a5, a6, a7,      // read addresses for the second instruction slot (superscalar)
   input logic [FLEN-1:0]   wd4,             // write data
-  output logic [FLEN-1:0]  rd1, rd2, rd3    // read data
+  output logic [FLEN-1:0]  rd1, rd2, rd3,   // read data
+  output logic [FLEN-1:0]  rd5, rd6, rd7    // read data for the second instruction slot
 );
 
    logic [FLEN-1:0] rf[31:0];
@@ -50,5 +52,8 @@ module fregfile #(parameter FLEN) (
    assign rd1 = rf[a1];
    assign rd2 = rf[a2];
    assign rd3 = rf[a3];
+   assign rd5 = rf[a5];
+   assign rd6 = rf[a6];
+   assign rd7 = rf[a7];
 
 endmodule // regfile

@@ -60,6 +60,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [P.XLEN-1:0]             SrcAM;
   logic [2:0]                    Funct3E;
   logic [31:0]                   InstrD;
+  logic [31:0]                   Instr2D;                                  // superscalar slot 1 instruction in Decode
   logic [31:0]                   InstrM, InstrOrigM;
   logic [P.XLEN-1:0]             PCSpillF, PCE, PCLinkE;
   logic [P.XLEN-1:0]             PCM, PCSpillM;
@@ -185,7 +186,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
     .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
-    .InstrD, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
+    .InstrD, .Instr2D, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
     .IllegalBaseInstrD, .IllegalFPUInstrD, .InstrPageFaultF, .IllegalIEUFPUInstrD, .InstrMisalignedFaultM,
@@ -199,7 +200,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      // Decode Stage interface
-     .InstrD, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
+     .InstrD, .Instr2D, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
      .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
@@ -335,6 +336,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .clk, .reset,
       .FRM_REGW,                           // Rounding mode from CSR
       .InstrD,                             // instruction from IFU
+      .Instr2D,                            // superscalar slot 1 instruction (decoded, not issued)
       .ReadDataW(ReadDataW[P.FLEN-1:0]),   // Read data from memory
       .ForwardedSrcAE,                     // Integer input being processed (from IEU)
       .StallE, .StallM, .StallW,           // stall signals from HZU
