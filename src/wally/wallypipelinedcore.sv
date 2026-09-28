@@ -61,6 +61,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic [2:0]                    Funct3E;
   logic [31:0]                   InstrD;
   logic [31:0]                   Instr2D;                                  // superscalar slot 1 instruction in Decode
+  logic                          Issue2D, Issue2E, Issue2M, Issue2W;       // superscalar slot 1 issues alongside slot 0
   logic [31:0]                   InstrM, InstrOrigM;
   logic [P.XLEN-1:0]             PCSpillF, PCE, PCLinkE;
   logic [P.XLEN-1:0]             PCM, PCSpillM;
@@ -186,7 +187,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
     .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
-    .InstrD, .Instr2D, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
+    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
     .IllegalBaseInstrD, .IllegalFPUInstrD, .InstrPageFaultF, .IllegalIEUFPUInstrD, .InstrMisalignedFaultM,
@@ -200,7 +201,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      // Decode Stage interface
-     .InstrD, .Instr2D, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
+     .InstrD, .Instr2D, .Issue2D, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
      .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
@@ -299,7 +300,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .FRegWriteM, .LoadStallD, .StoreStallD,
       .BPDirWrongM, .BTAWrongM, .BPWrongM,
       .RASPredPCWrongM, .IClassWrongM, .DivBusyE, .FDivBusyE,
-      .IClassM, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
+      .IClassM, .Issue2M, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
       .InstrPageFaultF, .LoadPageFaultM, .StoreAmoPageFaultM,
       .InstrMisalignedFaultM, .IllegalIEUFPUInstrD,
       .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,

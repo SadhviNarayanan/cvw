@@ -30,10 +30,10 @@
 
 module regfile #(parameter XLEN, E_SUPPORTED) (
   input  logic             clk, reset,
-  input  logic             we3,                 // Write enable
+  input  logic             we3, we6,            // Write enables for slot 0 (port 3) and slot 1 (port 6)
   input  logic [4:0]       a1, a2, a3,          // Source registers to read (a1, a2), destination register to write (a3)
-  input  logic [4:0]       a4, a5,              // Source registers to read for the second instruction slot (superscalar)
-  input  logic [XLEN-1:0]  wd3,                 // Write data for port 3
+  input  logic [4:0]       a4, a5, a6,          // Second instruction slot (superscalar): read a4/a5, write a6
+  input  logic [XLEN-1:0]  wd3, wd6,            // Write data for ports 3 and 6
   output logic [XLEN-1:0]  rd1, rd2,            // Read data for ports 1, 2
   output logic [XLEN-1:0]  rd4, rd5);           // Read data for ports 4, 5 (second instruction slot)
 
@@ -42,18 +42,24 @@ module regfile #(parameter XLEN, E_SUPPORTED) (
   logic [XLEN-1:0] rf[NUMREGS-1:1];
   integer i;
 
-  // Three ported register file
-  // Read two ports combinationally (a1/rd1, a2/rd2)
-  // Write third port on rising edge of clock (a3/wd3/we3)
+  // Six ported register file for dual issue
+  // Read four ports combinationally: slot 0 (a1/rd1, a2/rd2) and slot 1 (a4/rd4, a5/rd5)
+  // Write two ports (a3/wd3/we3 for slot 0, a6/wd6/we6 for slot 1)
   // Write occurs on falling edge of clock
   // Register 0 hardwired to 0
 
   // reset is intended for simulation only, not synthesis
   // can logic be adjusted to not need resettable registers?
 
+  // Slot 1 is the later instruction in program order, so it is written second and wins if both
+  // ports target the same register.  The issue logic refuses to pair instructions with the same
+  // destination, so that case should not arise; the ordering is explicit rather than implied.
   always_ff @(negedge clk)
     if (reset) for(i=1; i<NUMREGS; i++) rf[i] <= '0;
-    else       if (we3)                 rf[a3] <= wd3;
+    else begin
+      if (we3) rf[a3] <= wd3;
+      if (we6) rf[a6] <= wd6;
+    end
 
   assign rd1 = (a1 != 0) ? rf[a1] : 0;
   assign rd2 = (a2 != 0) ? rf[a2] : 0;

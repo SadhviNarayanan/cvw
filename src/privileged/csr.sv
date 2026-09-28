@@ -63,6 +63,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   input  logic                     RASPredPCWrongM,
   input  logic                     IClassWrongM,
   input  logic                     BPWrongM,                  // branch predictor is wrong
+  input  logic                     Issue2M,                                    // superscalar slot 1 retires alongside slot 0
   input  logic [3:0]               IClassM,
   input  logic                     DCacheMiss,
   input  logic                     DCacheAccess,
@@ -283,7 +284,7 @@ module csr import cvw::*;  #(parameter cvw_t P) (
   csrc #(P) counters(.clk, .reset, .StallE, .StallM, .FlushM,
     .InstrValidNotFlushedM, .LoadStallD, .StoreStallD, .CSRWriteM, .CSRMWriteM,
     .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .IClassWrongM, .BPWrongM,
-    .IClassM, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .sfencevmaM,
+    .IClassM, .Issue2M, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .sfencevmaM,
     .InterruptM, .ExceptionM, .InvalidateICacheM, .ICacheStallF, .DCacheStallM, .DivBusyE, .FDivBusyE,
     .CSRAdrM, .PrivilegeModeW, .CSRWriteValM,
     .MCOUNTINHIBIT_REGW, .MCOUNTEREN_REGW, .SCOUNTEREN_REGW,

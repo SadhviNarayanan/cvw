@@ -39,7 +39,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // the prediction
   input  logic [31:0]      InstrD,                    // Decompressed decode stage instruction. Used to decode instruction class
   input  logic [P.XLEN-1:0] PCNextF,                   // Next Fetch Address
-  input  logic [P.XLEN-1:0] PCPlus2or4F,               // PCF+2/4
+  input  logic [P.XLEN-1:0] PCNextSeqF,               // Sequential next PC: after slot 0, or after both slots when they issue together
   output logic [P.XLEN-1:0] PC1NextF,                  // Branch Predictor predicted or corrected fetch address on miss prediction
   output logic [P.XLEN-1:0] NextValidPCE,              // Address of next valid instruction after the instruction in the Memory stage
 
@@ -53,6 +53,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
 
   // Branch and jump outcome
   input  logic             InstrValidD, InstrValidE,
+  input  logic             Issue2E,                  // Slot 1 issued alongside slot 0, so the bundle is two instructions long
   input  logic             BranchD, BranchE,
   input  logic             JumpD, JumpE,
   input  logic             PCSrcE,                    // Execution stage branch is taken
@@ -79,6 +80,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]       BPPCF;
   logic [P.XLEN-1:0]       PC0NextF;
   logic [P.XLEN-1:0]       PCCorrectE;
+  logic [P.XLEN-1:0]       PCFallThroughE;  // Address after everything that issued in Execute
 
   logic                    RASTargetWrongE;
 
@@ -181,11 +183,17 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   assign BPPCSrcF = (BPBranchF & BPDirF[1]) | BPJumpF;
   mux2 #(P.XLEN) pcmuxbp(BPBTAF, RASPCF, BPReturnF, BPPCF);
   // Selects the BP or PC+2/4.
-  mux2 #(P.XLEN) pcmux0(PCPlus2or4F, BPPCF, BPPCSrcF, PC0NextF);
+  mux2 #(P.XLEN) pcmux0(PCNextSeqF, BPPCF, BPPCSrcF, PC0NextF);
   // If the prediction is wrong select the correct address.
   mux2 #(P.XLEN) pcmux1(PC0NextF, PCCorrectE, BPWrongE, PC1NextF);
-  // Correct branch/jump target.
-  mux2 #(P.XLEN) pccorrectemux(PCLinkE, IEUAdrE, PCSrcE, PCCorrectE);
+  // Correct branch/jump target.  When not taken, execution continues after everything that issued in
+  // Execute, which is one instruction past PCLinkE when slot 1 issued alongside slot 0.  Without
+  // this, BPWrongE fires on every dual-issue cycle and redirects to slot 1, which has already
+  // committed, so it would execute twice.
+  // PCLinkE itself must not change: it is also the address a jal writes to rd and the value the
+  // return-address stack pushes on a call, both of which are slot 0's.
+  assign PCFallThroughE = Issue2E ? PCLinkE + 'd4 : PCLinkE;
+  mux2 #(P.XLEN) pccorrectemux(PCFallThroughE, IEUAdrE, PCSrcE, PCCorrectE);
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.
   // Effectively this is PCM+4 or the non-existent PCLinkM

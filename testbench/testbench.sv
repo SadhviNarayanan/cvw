@@ -739,40 +739,125 @@ module testbench;
                 InstrM,  InstrW,
                 InstrFName, InstrDName, InstrEName, InstrMName, InstrWName);
 
-  // Superscalar step 1: the IFU fetches a 64-bit window (two instruction slots) but only slot 0 goes to
-  // Decode.  Nothing consumes slot 1 yet, so check it here: when execution is sequential, the instruction
-  // accepted into Decode must equal the slot-1 bits of the previously accepted fetch window.  A second slot
-  // only exists for cached, non-IROM, non-spill fetches whose whole window lies within one cache line.
-  if (P.ICACHE_SUPPORTED) begin : fetch2check
-    localparam OFFSETLEN = $clog2(P.ICACHE_LINELENINBITS/8);
-    logic              AcceptF;                 // F-stage instruction is being loaded into Decode this cycle
-    logic              Slot1ValidF, Slot1ValidPrev;
-    logic [P.XLEN-1:0] PCPrev, PCExpected;
-    logic [63:0]       FetchDataPrev;
-    logic              CompressedPrev;
-    logic [31:0]       ExpectedInstr;
-    assign AcceptF = ~reset & ~dut.core.ifu.StallD & ~dut.core.ifu.FlushD;
-    assign Slot1ValidF = dut.core.ifu.CacheableF & ~dut.core.ifu.SelIROM & (dut.core.ifu.PCSpillF == dut.core.ifu.PCF) &
-                         (dut.core.ifu.PCF[OFFSETLEN-1:0] <= (P.ICACHE_LINELENINBITS/8 - 8));
+  // Superscalar: the front end decodes two instruction slots but issues only slot 0.  Nothing downstream
+  // consumes slot 1 yet, so check it here.  Whenever Decode advances and execution is sequential, the
+  // instruction that just arrived in Decode (slot 0) must be exactly what the previous Decode held in
+  // slot 1: same PC, same raw and decompressed bits, and the same decode results (source registers,
+  // immediate, register-file reads, branch/jump/illegal flags).
+  // Remove this block once slot 1 issues: slot 1 then no longer reappears as the next slot 0.
+  if (P.ICACHE_SUPPORTED) begin : decode2check
+    logic              AdvanceD;              // Decode is loading a new instruction this cycle
+    logic              CheckPending;          // Decode advanced last cycle, so compare now
+    logic              Instr2ValidPrev;
+    logic [P.XLEN-1:0] Instr2PCPrev, ImmExt2Prev, R1_2Prev, R2_2Prev;
+    logic [31:0]       Instr2RawPrev, Instr2Prev;
+    logic [4:0]        Rs1_2Prev, Rs2_2Prev;
+    logic [2:0]        ImmSrc2Prev;
+    logic              Branch2Prev, Jump2Prev, Illegal2Prev;
+    logic              CompressedNow, Slot0Squashed, R1Written, R2Written;
+    integer            ChecksDone = 0;
+
+    assign AdvanceD = ~reset & ~dut.core.ifu.StallD & ~dut.core.ifu.FlushD;
+    always_ff @(posedge clk) begin
+      if (AdvanceD) begin                                       // remember slot 1 as Decode is replaced
+        Instr2ValidPrev <= dut.core.ifu.Instr2ValidD;
+        Instr2PCPrev    <= dut.core.ifu.Instr2PCD;
+        Instr2RawPrev   <= dut.core.ifu.Instr2RawD;
+        Instr2Prev      <= dut.core.ifu.Instr2D;
+        Rs1_2Prev       <= dut.core.ieu.Rs1_2D;
+        Rs2_2Prev       <= dut.core.ieu.Rs2_2D;
+        ImmSrc2Prev     <= dut.core.ieu.ImmSrc2D;
+        ImmExt2Prev     <= dut.core.ieu.dp.ImmExt2D;
+        R1_2Prev        <= dut.core.ieu.dp.R1_2D;
+        R2_2Prev        <= dut.core.ieu.dp.R2_2D;
+        Branch2Prev     <= dut.core.ieu.Branch2D;
+        Jump2Prev       <= dut.core.ieu.Jump2D;
+        Illegal2Prev    <= dut.core.ieu.IllegalBaseInstr2D;
+        CheckPending    <= 1'b1;
+      end else CheckPending <= 1'b0;
+      // fence.i / I$ invalidate: memory may have changed, so the remembered slot 1 is stale
+      if (dut.core.ifu.CSRWriteFenceM | dut.core.ifu.InvalidateICacheM) Instr2ValidPrev <= 1'b0;
+    end
+
+    assign CompressedNow = ~&dut.core.ifu.InstrRawD[1:0];
+    assign Slot0Squashed = dut.core.ifu.IllegalIEUFPUInstrD;    // slot 0's controls are zeroed for an illegal instruction; slot 1's are not
+    // a writeback in between the two reads changes the register file, so skip that operand
+    assign R1Written = ((dut.core.ieu.RegWriteW  & (dut.core.ieu.RdW  == Rs1_2Prev)) |
+                        (dut.core.ieu.RegWrite2W & (dut.core.ieu.Rd2W == Rs1_2Prev))) & (Rs1_2Prev != 0);
+    assign R2Written = ((dut.core.ieu.RegWriteW  & (dut.core.ieu.RdW  == Rs2_2Prev)) |
+                        (dut.core.ieu.RegWrite2W & (dut.core.ieu.Rd2W == Rs2_2Prev))) & (Rs2_2Prev != 0);
+
     always_ff @(posedge clk)
-      if (AcceptF) begin
-        PCPrev         <= dut.core.ifu.PCF;
-        FetchDataPrev  <= dut.core.ifu.FetchDataF;
-        CompressedPrev <= dut.core.ifu.CompressedF;
-        Slot1ValidPrev <= Slot1ValidF;
-      end else if (dut.core.ifu.CSRWriteFenceM | dut.core.ifu.InvalidateICacheM)
-        Slot1ValidPrev <= 1'b0;                 // memory may have changed (fence.i); previous window is stale
-    assign PCExpected    = PCPrev + (CompressedPrev ? 2 : 4);
-    assign ExpectedInstr = CompressedPrev ? FetchDataPrev[47:16] : FetchDataPrev[63:32];
-    always_ff @(posedge clk)
-      if (AcceptF & Slot1ValidPrev & Slot1ValidF & (dut.core.ifu.PCF == PCExpected))
-        if (dut.core.ifu.CompressedF ? (ExpectedInstr[15:0] != dut.core.ifu.PostSpillInstrRawF[15:0])
-                                     : (ExpectedInstr       != dut.core.ifu.PostSpillInstrRawF)) begin
-          $error("Fetch slot 1 mismatch: window at PC %h predicted %h for PC %h but fetch returned %h",
-                 PCPrev, ExpectedInstr, dut.core.ifu.PCF, dut.core.ifu.PostSpillInstrRawF);
-          $fatal(1);
+      if (CheckPending & Instr2ValidPrev & (dut.core.ifu.PCD == Instr2PCPrev)) begin
+        ChecksDone <= ChecksDone + 1;
+        if (CompressedNow ? (Instr2RawPrev[15:0] != dut.core.ifu.InstrRawD[15:0]) : (Instr2RawPrev != dut.core.ifu.InstrRawD))
+          $fatal(1, "decode2check: raw mismatch at PC %h: slot 1 %h, slot 0 %h", dut.core.ifu.PCD, Instr2RawPrev, dut.core.ifu.InstrRawD);
+        if (Instr2Prev != dut.core.ifu.InstrD)
+          $fatal(1, "decode2check: decompressed mismatch at PC %h: slot 1 %h, slot 0 %h", dut.core.ifu.PCD, Instr2Prev, dut.core.ifu.InstrD);
+        if ({Rs1_2Prev, Rs2_2Prev} != {dut.core.ieu.Rs1D, dut.core.ieu.Rs2D})
+          $fatal(1, "decode2check: Rs1/Rs2 mismatch at PC %h: slot 1 x%0d/x%0d, slot 0 x%0d/x%0d", dut.core.ifu.PCD, Rs1_2Prev, Rs2_2Prev, dut.core.ieu.Rs1D, dut.core.ieu.Rs2D);
+        if ({Branch2Prev, Jump2Prev, Illegal2Prev} != {dut.core.ieu.BranchD, dut.core.ieu.JumpD, dut.core.ieu.IllegalBaseInstrD})
+          $fatal(1, "decode2check: branch/jump/illegal mismatch at PC %h: slot 1 %b, slot 0 %b", dut.core.ifu.PCD, {Branch2Prev, Jump2Prev, Illegal2Prev}, {dut.core.ieu.BranchD, dut.core.ieu.JumpD, dut.core.ieu.IllegalBaseInstrD});
+        if (~Slot0Squashed & ({ImmSrc2Prev, ImmExt2Prev} != {dut.core.ieu.ImmSrcD, dut.core.ieu.dp.ImmExtD}))
+          $fatal(1, "decode2check: immediate mismatch at PC %h: slot 1 src %b ext %h, slot 0 src %b ext %h", dut.core.ifu.PCD, ImmSrc2Prev, ImmExt2Prev, dut.core.ieu.ImmSrcD, dut.core.ieu.dp.ImmExtD);
+        if (~R1Written & (R1_2Prev != dut.core.ieu.dp.R1D))
+          $fatal(1, "decode2check: R1 mismatch at PC %h (x%0d): slot 1 %h, slot 0 %h", dut.core.ifu.PCD, Rs1_2Prev, R1_2Prev, dut.core.ieu.dp.R1D);
+        if (~R2Written & (R2_2Prev != dut.core.ieu.dp.R2D))
+          $fatal(1, "decode2check: R2 mismatch at PC %h (x%0d): slot 1 %h, slot 0 %h", dut.core.ifu.PCD, Rs2_2Prev, R2_2Prev, dut.core.ieu.dp.R2D);
+      end
+
+    // FP decode: slot 1's fctrl outputs and FP register-file reads must match slot 0's the next cycle
+    if (P.F_SUPPORTED) begin : fpcheck
+      logic [4:0]        FAdr1_2Prev, FAdr2_2Prev, FAdr3_2Prev;
+      logic              XEn2Prev, YEn2Prev, ZEn2Prev, FIllegal2Prev;
+      logic [P.FLEN-1:0] FRD1_2Prev, FRD2_2Prev, FRD3_2Prev;
+      logic              F1Written, F2Written, F3Written;
+      always_ff @(posedge clk)
+        if (AdvanceD) begin
+          {FAdr1_2Prev, FAdr2_2Prev, FAdr3_2Prev} <= {dut.core.fpu.fpu.Adr1_2D, dut.core.fpu.fpu.Adr2_2D, dut.core.fpu.fpu.Adr3_2D};
+          {XEn2Prev, YEn2Prev, ZEn2Prev}          <= {dut.core.fpu.fpu.XEn2D, dut.core.fpu.fpu.YEn2D, dut.core.fpu.fpu.ZEn2D};
+          FIllegal2Prev                           <= dut.core.fpu.fpu.IllegalFPUInstr2D;
+          {FRD1_2Prev, FRD2_2Prev, FRD3_2Prev}    <= {dut.core.fpu.fpu.FRD1_2D, dut.core.fpu.fpu.FRD2_2D, dut.core.fpu.fpu.FRD3_2D};
         end
+      // an FP writeback in between the two reads changes the register file, so skip that operand
+      assign F1Written = dut.core.fpu.fpu.FRegWriteW & (dut.core.fpu.fpu.RdW == FAdr1_2Prev);
+      assign F2Written = dut.core.fpu.fpu.FRegWriteW & (dut.core.fpu.fpu.RdW == FAdr2_2Prev);
+      assign F3Written = dut.core.fpu.fpu.FRegWriteW & (dut.core.fpu.fpu.RdW == FAdr3_2Prev);
+      always_ff @(posedge clk)
+        if (CheckPending & Instr2ValidPrev & (dut.core.ifu.PCD == Instr2PCPrev)) begin
+          if ({FAdr1_2Prev, FAdr2_2Prev, FAdr3_2Prev} != {dut.core.fpu.fpu.Adr1D, dut.core.fpu.fpu.Adr2D, dut.core.fpu.fpu.Adr3D})
+            $fatal(1, "decode2check: FP Adr mismatch at PC %h: slot 1 f%0d/f%0d/f%0d, slot 0 f%0d/f%0d/f%0d", dut.core.ifu.PCD,
+                   FAdr1_2Prev, FAdr2_2Prev, FAdr3_2Prev, dut.core.fpu.fpu.Adr1D, dut.core.fpu.fpu.Adr2D, dut.core.fpu.fpu.Adr3D);
+          if ({XEn2Prev, YEn2Prev, ZEn2Prev, FIllegal2Prev} != {dut.core.fpu.fpu.XEnD, dut.core.fpu.fpu.YEnD, dut.core.fpu.fpu.ZEnD, dut.core.fpu.fpu.IllegalFPUInstrD})
+            $fatal(1, "decode2check: FP XYZEn/illegal mismatch at PC %h: slot 1 %b, slot 0 %b", dut.core.ifu.PCD,
+                   {XEn2Prev, YEn2Prev, ZEn2Prev, FIllegal2Prev}, {dut.core.fpu.fpu.XEnD, dut.core.fpu.fpu.YEnD, dut.core.fpu.fpu.ZEnD, dut.core.fpu.fpu.IllegalFPUInstrD});
+          if (~F1Written & (FRD1_2Prev != dut.core.fpu.fpu.FRD1D))
+            $fatal(1, "decode2check: FRD1 mismatch at PC %h (f%0d): slot 1 %h, slot 0 %h", dut.core.ifu.PCD, FAdr1_2Prev, FRD1_2Prev, dut.core.fpu.fpu.FRD1D);
+          if (~F2Written & (FRD2_2Prev != dut.core.fpu.fpu.FRD2D))
+            $fatal(1, "decode2check: FRD2 mismatch at PC %h (f%0d): slot 1 %h, slot 0 %h", dut.core.ifu.PCD, FAdr2_2Prev, FRD2_2Prev, dut.core.fpu.fpu.FRD2D);
+          if (~F3Written & (FRD3_2Prev != dut.core.fpu.fpu.FRD3D))
+            $fatal(1, "decode2check: FRD3 mismatch at PC %h (f%0d): slot 1 %h, slot 0 %h", dut.core.ifu.PCD, FAdr3_2Prev, FRD3_2Prev, dut.core.fpu.fpu.FRD3D);
+        end
+    end
+    final $display("decode2check: %0d slot-1 decodes verified against slot 0", ChecksDone);
   end
+
+  // Report how often the two slots actually issue together.  This is the headline number for the
+  // superscalar work: it bounds the speedup the issue rules currently allow.
+  if (P.ICACHE_SUPPORTED) begin : issuerate
+    integer Retired = 0, RetiredPaired = 0;
+    always_ff @(posedge clk)
+      if (~reset & dut.core.ieu.c.InstrValidM & ~dut.core.ifu.StallW & ~dut.core.ifu.FlushW) begin
+        Retired <= Retired + 1;
+        if (dut.core.ifu.Issue2M) RetiredPaired <= RetiredPaired + 1;
+      end
+    final
+      if (Retired > 0)
+        $display("issuerate: %0d instructions retired, %0d of them paired (%0d%% of cycles dual-issued)",
+                 Retired + RetiredPaired, RetiredPaired, (100 * RetiredPaired) / Retired);
+  end
+
+
 
   // watch for problems such as lockup, reading uninitialized memory, bad configs
 `ifdef MEMPIPE_PROBE
@@ -839,7 +924,9 @@ module testbench;
 
 // RVVI trace for functional coverage and lockstep
 `ifdef ENABLE_RVVI_TRACE
-  rvviTrace #(.XLEN(P.XLEN), .FLEN(P.FLEN)) rvvi();
+  // RETIRE=2: the superscalar core can retire two instructions in one cycle, and each needs its own
+  // RVVI record or the reference model falls a instruction behind and never catches up.
+  rvviTrace #(.XLEN(P.XLEN), .FLEN(P.FLEN), .RETIRE(2)) rvvi();
   wallyTracer #(P) wallyTracer(rvvi);
 `endif
 

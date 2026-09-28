@@ -32,6 +32,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Decode stage signals
   input  logic [31:0]       InstrD,                          // Instruction
   input  logic [31:0]       Instr2D,                         // Second instruction (superscalar slot 1), decoded but not issued
+  input  logic              Issue2D,                         // Slot 1 is paired with slot 0 this cycle
   input  logic [1:0]        STATUS_FS,                       // is FPU enabled?
   input  logic [3:0]        ENVCFG_CBE,                      // Cache block operation enables
   input  logic              IllegalIEUFPUInstrD,             // Illegal instruction
@@ -109,8 +110,26 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic       IllegalBaseInstr2D;                            // Slot 1 is an illegal base instruction
   logic       Branch2D, Jump2D;                              // Slot 1 is a branch / jump
   logic       InstrValid2D;                                  // Slot 1 controller valid bit (not yet qualified by the IFU's Instr2ValidD)
-  logic       StructuralStall2D, LoadStall2D, StoreStall2D;  // Slot 1 hazards against the instruction in Execute
-  logic [1:0] ForwardAE, ForwardBE;                          // Select signals for forwarding multiplexers
+  logic       StructuralStall0D;                             // Slot 0's own structural hazards
+  logic       StructuralStall2D;                             // Slot 1 depends on a result not ready to forward
+  logic       RegWriteM;                                     // Slot 0 writes a register in Memory
+  logic       RegWrite2M, RegWrite2W;                        // Slot 1 writes a register in Memory / Writeback
+  logic [4:0] Rd2M, Rd2W;                                    // Slot 1 destination register in Memory / Writeback
+
+  // Slot 1 Execute-stage signals.  Slot 1 computes a result but does not commit it yet.
+  logic [4:0] Rs1_2E, Rs2_2E;                                // Slot 1 source registers in Execute
+  logic [2:0] Forward2AE, Forward2BE;                        // Lane 2 forwarding selects (from controller c2)
+  logic       ALUSrcA2E, ALUSrcB2E, ALUResultSrc2E;          // Slot 1 ALU operand and result selects
+  logic [2:0] ALUSelect2E;                                   // Slot 1 ALU operation
+  logic [2:0] Funct3_2E;                                     // Slot 1 funct3
+  logic [6:0] Funct7_2E;                                     // Slot 1 funct7
+  logic       W64_2E, UW64_2E, SubArith2E;                   // Slot 1 W-type, .uw-type, subtract/arithmetic-shift
+  logic       Jump2E;                                        // Slot 1 is a jump (always 0 under the issue rules)
+  logic [3:0] BSelect2E, ZBBSelect2E;                        // Slot 1 bit-manipulation selects
+  logic [2:0] BALUControl2E;                                 // Slot 1 bit-manipulation ALU control
+  logic       BMUActive2E;                                   // Slot 1 bit-manipulation instruction active
+  logic [1:0] CZero2E;                                       // Slot 1 czero.* active
+  logic [2:0] ForwardAE, ForwardBE;                          // Select signals for forwarding multiplexers
   logic       RegWriteW;                                     // Register will be written in Writeback stage
   logic       BranchSignedE;                                 // Branch does signed comparison on operands
   logic       BMUActiveE;                                    // Bit manipulation instruction being executed
@@ -119,7 +138,8 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   controller #(P) c(
     .clk, .reset, .StallD, .FlushD, .InstrD, .STATUS_FS, .ENVCFG_CBE, .ImmSrcD,
     .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
-    .StructuralStallD, .LoadStallD, .StoreStallD, .Rs1D, .Rs2D,  .Rs2E,
+    .StructuralStallD(StructuralStall0D), .LoadStallD, .StoreStallD, .Rs1D, .Rs2D, .Rs2E,
+    .Rs1_2D, .Rs2_2D, .StructuralStall2D,                     // lane 2's hazard, computed here against the real RdE
     .StallE, .FlushE, .FlagsE, .FWriteIntE,
     .PCSrcE, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE,
     .Funct3E, .Funct7E, .IntDivE, .W64E, .UW64E, .SubArithE, .BranchD, .BranchE, .JumpD, .JumpE,
@@ -127,8 +147,10 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .FCvtIntE, .ForwardAE, .ForwardBE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
     .StallM, .FlushM, .MemRWE, .MemRWM, .CSRReadM, .CSRWriteM, .PrivilegedM, .AtomicM, .Funct3M,
     .FlushDCacheM, .InstrValidM, .InstrValidE, .InstrValidD, .FWriteIntM,
+    .RegWriteM, .RegWriteOtherM(RegWrite2M),                  // lane 1 forwards from lane 2
     .StallW, .FlushW, .RegWriteW, .IntDivW, .ResultSrcW, .CSRWriteFenceM, .InvalidateICacheM,
-    .RdW, .RdE, .RdM);
+    .RegWriteOtherW(RegWrite2W),
+    .RdW, .RdE, .RdM, .RdOtherM(Rd2M), .RdOtherW(Rd2W));
 
   // Slot 1 controller (superscalar).  A second copy of the controller decodes Instr2D in the Decode stage.
   // Only its Decode-stage outputs are used; slot 1 does not issue, so its Execute/Memory/Writeback
@@ -136,21 +158,39 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   controller #(P) c2(
     .clk, .reset, .StallD, .FlushD, .InstrD(Instr2D), .STATUS_FS, .ENVCFG_CBE, .ImmSrcD(ImmSrc2D),
     .IllegalIEUFPUInstrD(1'b0), .IllegalBaseInstrD(IllegalBaseInstr2D),
-    .StructuralStallD(StructuralStall2D), .LoadStallD(LoadStall2D), .StoreStallD(StoreStall2D),
-    .Rs1D(Rs1_2D), .Rs2D(Rs2_2D), .Rs2E(),
-    .StallE, .FlushE, .FlagsE(2'b00), .FWriteIntE(1'b0),
-    .PCSrcE(), .ALUSrcAE(), .ALUSrcBE(), .ALUResultSrcE(), .ALUSelectE(),
-    .Funct3E(), .Funct7E(), .IntDivE(), .W64E(), .UW64E(), .SubArithE(), .BranchD(Branch2D), .BranchE(), .JumpD(Jump2D), .JumpE(),
-    .BranchSignedE(), .BSelectE(), .ZBBSelectE(), .BALUControlE(), .BMUActiveE(), .CZeroE(), .MDUActiveE(),
-    .FCvtIntE(1'b0), .ForwardAE(), .ForwardBE(), .CMOpM(), .IFUPrefetchE(), .LSUPrefetchM(),
+    // The load-use hazard cannot be computed here: it depends on the Execute-stage control of the
+    // real pipeline (MemReadE, CSRReadE, MDUE), which only c has.  c computes it for both lanes.
+    .StructuralStallD(), .LoadStallD(), .StoreStallD(),
+    .Rs1_2D(5'b0), .Rs2_2D(5'b0), .StructuralStall2D(),
+    .Rs1D(Rs1_2D), .Rs2D(Rs2_2D), .Rs2E(Rs2_2E),
+    // An unpaired slot 1 is flushed on its way into Execute rather than being allowed down the
+    // pipeline and suppressed at each consumer.  Its control signals, RegWrite2M/W and Rd2M/W then
+    // come out as zero on their own, so nothing downstream needs to know about pairing.
+    .StallE, .FlushE(FlushE | ~Issue2D), .FlagsE(2'b00), .FWriteIntE(1'b0),
+    .PCSrcE(), .ALUSrcAE(ALUSrcA2E), .ALUSrcBE(ALUSrcB2E), .ALUResultSrcE(ALUResultSrc2E), .ALUSelectE(ALUSelect2E),
+    .Funct3E(Funct3_2E), .Funct7E(Funct7_2E), .IntDivE(), .W64E(W64_2E), .UW64E(UW64_2E), .SubArithE(SubArith2E),
+    .BranchD(Branch2D), .BranchE(), .JumpD(Jump2D), .JumpE(Jump2E),
+    .BranchSignedE(), .BSelectE(BSelect2E), .ZBBSelectE(ZBBSelect2E), .BALUControlE(BALUControl2E),
+    .BMUActiveE(BMUActive2E), .CZeroE(CZero2E), .MDUActiveE(),
+    .FCvtIntE(1'b0), .ForwardAE(Forward2AE), .ForwardBE(Forward2BE), .CMOpM(), .IFUPrefetchE(), .LSUPrefetchM(),
     .StallM, .FlushM, .MemRWE(), .MemRWM(), .CSRReadM(), .CSRWriteM(), .PrivilegedM(), .AtomicM(), .Funct3M(),
     .FlushDCacheM(), .InstrValidM(), .InstrValidE(), .InstrValidD(InstrValid2D), .FWriteIntM(),
-    .StallW, .FlushW, .RegWriteW(), .IntDivW(), .ResultSrcW(), .CSRWriteFenceM(), .InvalidateICacheM(),
-    .RdW(), .RdE(), .RdM());
+    .RegWriteM(RegWrite2M), .RegWriteOtherM(RegWriteM),       // lane 2 forwards from lane 1
+    .StallW, .FlushW, .RegWriteW(RegWrite2W), .IntDivW(), .ResultSrcW(), .CSRWriteFenceM(), .InvalidateICacheM(),
+    .RegWriteOtherW(RegWriteW),
+    .RdW(Rd2W), .RdE(), .RdM(Rd2M), .RdOtherM(RdM), .RdOtherW(RdW));
+
+  // Stall the bundle when slot 1 depends on a result that cannot be forwarded yet, exactly as slot 0
+  // already does.  Gated by Issue2D so a slot 1 hazard costs nothing on cycles where the two slots
+  // were never going to issue together.
+  assign StructuralStallD = StructuralStall0D | (Issue2D & StructuralStall2D);
 
   datapath #(P) dp(
     .clk, .reset, .ImmSrcD, .InstrD, .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
-    .ImmSrc2D, .Instr2D, .Rs1_2D, .Rs2_2D,                                                          // slot 1
+    .ImmSrc2D, .Instr2D, .Rs1_2D, .Rs2_2D, .Rs2_2E, .Forward2AE, .Forward2BE,                       // slot 1
+    .ALUSrcA2E, .ALUSrcB2E, .ALUResultSrc2E, .ALUSelect2E, .Funct3_2E, .Funct7_2E,                  // slot 1
+    .W64_2E, .UW64_2E, .SubArith2E, .BSelect2E, .ZBBSelect2E, .BALUControl2E, .BMUActive2E, .CZero2E, // slot 1
+    .RegWrite2W, .Rd2W,                                                                             // slot 1 write port
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,

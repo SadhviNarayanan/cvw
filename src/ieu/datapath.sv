@@ -37,13 +37,28 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [2:0]        ImmSrc2D,                // Slot 1 (superscalar): immediate format
   input  logic [31:0]       Instr2D,                 // Slot 1: instruction in Decode stage
   input  logic [4:0]        Rs1_2D, Rs2_2D,          // Slot 1: source registers
+  input  logic [4:0]        Rs2_2E,                  // Slot 1: source register 2 in Execute (ALU bit-manipulation)
+  input  logic [2:0]        Forward2AE, Forward2BE,  // Slot 1: forwarding selects
+  input  logic              ALUSrcA2E, ALUSrcB2E,    // Slot 1: ALU operands
+  input  logic              ALUResultSrc2E,          // Slot 1: selects ALU result or immediate
+  input  logic [2:0]        ALUSelect2E,             // Slot 1: ALU mux select
+  input  logic [2:0]        Funct3_2E,               // Slot 1: funct3
+  input  logic [6:0]        Funct7_2E,               // Slot 1: funct7
+  input  logic              W64_2E, UW64_2E,         // Slot 1: RV64 W-type / .uw-type
+  input  logic              SubArith2E,              // Slot 1: subtract or arithmetic shift
+  input  logic [3:0]        BSelect2E, ZBBSelect2E,  // Slot 1: bit-manipulation selects
+  input  logic [2:0]        BALUControl2E,           // Slot 1: bit-manipulation ALU control
+  input  logic              BMUActive2E,             // Slot 1: bit-manipulation instruction active
+  input  logic [1:0]        CZero2E,                 // Slot 1: czero.* active
+  input  logic              RegWrite2W,              // Slot 1: commits a register write this cycle
+  input  logic [4:0]        Rd2W,                    // Slot 1: destination register in Writeback
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
   input  logic [2:0]        Funct3E,                 // Funct3 field of instruction in Execute stage
   input  logic [6:0]        Funct7E,                 // Funct7 field of instruction in Execute stage
   input  logic              StallE, FlushE,          // Stall, flush Execute stage
-  input  logic [1:0]        ForwardAE, ForwardBE,    // Forward ALU operands from later stages
+  input  logic [2:0]        ForwardAE, ForwardBE,    // Forward ALU operands from later stages
   input  logic              W64E,UW64E,              // W64/.uw-type instruction
   input  logic              SubArithE,               // Subtraction or arithmetic shift
   input  logic              ALUSrcAE, ALUSrcBE,      // ALU operands
@@ -83,8 +98,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   // Decode stage signals
   logic [P.XLEN-1:0] R1D, R2D;                       // Read data from Rs1 (RD1), Rs2 (RD2)
   logic [P.XLEN-1:0] ImmExtD;                        // Extended immediate in Decode stage
-  logic [P.XLEN-1:0] R1_2D, R2_2D;                   // Slot 1: read data from Rs1_2D, Rs2_2D (not issued yet)
+  logic [P.XLEN-1:0] R1_2D, R2_2D;                   // Slot 1: read data from Rs1_2D, Rs2_2D
   logic [P.XLEN-1:0] ImmExt2D;                       // Slot 1: extended immediate in Decode stage
+  logic [P.XLEN-1:0] R1_2E, R2_2E, ImmExt2E;         // Slot 1: the same, in Execute
+  logic [P.XLEN-1:0] ForwardedSrc2AE, ForwardedSrc2BE; // Slot 1: operands after forwarding
+  logic [P.XLEN-1:0] SrcA2E, SrcB2E;                 // Slot 1: ALU inputs
+  logic [P.XLEN-1:0] ALUResult2E, IEUAdrRaw2E;       // Slot 1: ALU outputs
+  logic [P.XLEN-1:0] AltResult2E, IEUResult2E;       // Slot 1: result in Execute
+  logic [P.XLEN-1:0] IEUResult2M, ResultW2;          // Slot 1: result in Memory, and written back
+  logic [1:0]        Flags2E;                        // Slot 1: comparator flags (unused until slot 1 may branch)
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
   logic [P.XLEN-1:0] ImmExtE;                        // Extended immediate in Execute stage
@@ -102,7 +124,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] MulDivResultW;                  // Multiply always comes from MDU.  Divide could come from MDU or FPU (when using fdivsqrt for integer division)
 
   // Decode stage
-  regfile #(P.XLEN, P.E_SUPPORTED) regf(clk, reset, RegWriteW, Rs1D, Rs2D, RdW, Rs1_2D, Rs2_2D, ResultW, R1D, R2D, R1_2D, R2_2D);
+  regfile #(P.XLEN, P.E_SUPPORTED) regf(clk, reset, RegWriteW, RegWrite2W, Rs1D, Rs2D, RdW,
+    Rs1_2D, Rs2_2D, Rd2W, ResultW, ResultW2, R1D, R2D, R1_2D, R2_2D);
   extend #(P)        ext(.InstrD(InstrD[31:7]), .ImmSrcD, .ImmExtD);
   extend #(P)        ext2(.InstrD(Instr2D[31:7]), .ImmSrcD(ImmSrc2D), .ImmExtD(ImmExt2D));   // slot 1
 
@@ -111,8 +134,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   flopenrc #(P.XLEN) RD2EReg(clk, reset, FlushE, ~StallE, R2D, R2E);
   flopenrc #(P.XLEN) ImmExtEReg(clk, reset, FlushE, ~StallE, ImmExtD, ImmExtE);
 
-  mux3  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ForwardAE, ForwardedSrcAE);
-  mux3  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ForwardBE, ForwardedSrcBE);
+  // Forwarding sources in the order each lane's select encodes them: no forward, own Writeback,
+  // own Memory, other Writeback, other Memory.  The encoding is relative to the lane, so lane 2's
+  // muxes below take the same four sources with the pairs swapped.  See controller.sv for priority.
+  mux5  #(P.XLEN)  faemux(R1E, ResultW, IFResultM, ResultW2, IEUResult2M, ForwardAE, ForwardedSrcAE);
+  mux5  #(P.XLEN)  fbemux(R2E, ResultW, IFResultM, ResultW2, IEUResult2M, ForwardBE, ForwardedSrcBE);
   comparator #(P.XLEN) comp(ForwardedSrcAE, ForwardedSrcBE, BranchSignedE, FlagsE);
   mux2  #(P.XLEN)  srcamux(ForwardedSrcAE, PCE, ALUSrcAE, SrcAE);
   mux2  #(P.XLEN)  srcbmux(ForwardedSrcBE, ImmExtE, ALUSrcBE, SrcBE);
@@ -122,6 +148,32 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   assign IEUAdrE = {IEUAdrRawE[P.XLEN-1:1], IEUAdrRawE[0] & ~JumpE};
   mux2  #(P.XLEN)  altresultmux(ImmExtE, PCLinkE, JumpE, AltResultE);
   mux2  #(P.XLEN)  ieuresultmux(ALUResultE, AltResultE, ALUResultSrcE, IEUResultE);
+
+  // Slot 1 (superscalar) Execute stage, mirroring slot 0 above.  Its result is computed but not
+  // committed yet, so slot 1 has no Memory-stage register and no branch/jump redirect.
+  flopenrc #(P.XLEN) RD1_2EReg(clk, reset, FlushE, ~StallE, R1_2D, R1_2E);
+  flopenrc #(P.XLEN) RD2_2EReg(clk, reset, FlushE, ~StallE, R2_2D, R2_2E);
+  flopenrc #(P.XLEN) ImmExt2EReg(clk, reset, FlushE, ~StallE, ImmExt2D, ImmExt2E);
+
+  mux5  #(P.XLEN)  faemux2(R1_2E, ResultW2, IEUResult2M, ResultW, IFResultM, Forward2AE, ForwardedSrc2AE);
+  mux5  #(P.XLEN)  fbemux2(R2_2E, ResultW2, IEUResult2M, ResultW, IFResultM, Forward2BE, ForwardedSrc2BE);
+  // Slot 1 sits one instruction after slot 0, so its PC is PCLinkE (= PCE + 4, since the issue
+  // rules require an uncompressed slot 0).  Using PCE here would make every paired auipc off by 4.
+  mux2  #(P.XLEN)  srcamux2(ForwardedSrc2AE, PCLinkE, ALUSrcA2E, SrcA2E);
+  mux2  #(P.XLEN)  srcbmux2(ForwardedSrc2BE, ImmExt2E, ALUSrcB2E, SrcB2E);
+  alu   #(P)       alu2(SrcA2E, SrcB2E, W64_2E, UW64_2E, SubArith2E, ALUSelect2E, BSelect2E, ZBBSelect2E,
+                        Funct3_2E, Funct7_2E, Rs2_2E, BALUControl2E, BMUActive2E, CZero2E, ALUResult2E, IEUAdrRaw2E);
+  // Slot 0's altresultmux also selects PCLinkE as a jump's link value.  Slot 1 cannot jump under the
+  // issue rules, and its link value would be PCLinkE + 4 rather than PCLinkE, so that input is left
+  // out rather than wired to a value that is wrong but currently unreachable.
+  assign AltResult2E = ImmExt2E;                     // lui writes its immediate straight through
+  mux2  #(P.XLEN)  ieuresultmux2(ALUResult2E, AltResult2E, ALUResultSrc2E, IEUResult2E);
+
+  // Slot 1 Memory and Writeback.  Slot 0 needs a mux5 in Writeback to choose between the ALU, a
+  // load, a CSR read, the multiply/divide unit and a store-conditional; slot 1 can only be an ALU
+  // operation, so its result just flows through.
+  flopenrc #(P.XLEN) IEUResult2MReg(clk, reset, FlushM, ~StallM, IEUResult2E, IEUResult2M);
+  flopenrc #(P.XLEN) IEUResult2WReg(clk, reset, FlushW, ~StallW, IEUResult2M, ResultW2);
 
   // Memory stage pipeline register
   flopenrc #(P.XLEN) SrcAMReg(clk, reset, FlushM, ~StallM, SrcAE, SrcAM);

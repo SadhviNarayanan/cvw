@@ -41,9 +41,11 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        JumpD,                   // Jump instruction
   output logic        BranchD,                 // Branch instruction
   output logic        StructuralStallD,        // Structural stalls detected by controller
+  output logic        StructuralStall2D,       // Slot 1 (superscalar) depends on a result that is not ready to forward
   output logic        LoadStallD,              // Structural stalls for load, sent to performance counters
   output logic        StoreStallD,             // load after store hazard
   output logic [4:0]  Rs1D, Rs2D, Rs2E,        // Register sources to read in Decode or Execute stage
+  input  logic [4:0]  Rs1_2D, Rs2_2D,          // The other issue slot's register sources in Decode
   // Execute stage control signals
   input  logic        StallE, FlushE,          // Stall, flush Execute stage
   input  logic [1:0]  FlagsE,                  // Comparison flags ({eq, lt})
@@ -70,7 +72,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic [3:0]  CMOpM,                   // 1: cbo.inval; 2: cbo.clean; 4: cbo.flush; 8: cbo.zero
   output logic        IFUPrefetchE,            // instruction prefetch
   output logic        LSUPrefetchM,            // data prefetch
-  output logic [1:0]  ForwardAE, ForwardBE,    // Select signals for forwarding multiplexers
+  output logic [2:0]  ForwardAE, ForwardBE,    // Select signals for forwarding multiplexers
   // Memory stage control signals
   input  logic        StallM, FlushM,          // Stall, flush Memory stage
   output logic [1:0]  MemRWE,                  // Mem read/write: MemRWM[1] = 1 for read, MemRWM[0] = 1 for write
@@ -81,18 +83,21 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        InvalidateICacheM, FlushDCacheM, // Invalidate I$, flush D$
   output logic        InstrValidD, InstrValidE, InstrValidM, // Instruction is valid
   output logic        FWriteIntM,              // FPU controller writes integer register file
+  output logic        RegWriteM,               // Instruction writes a register in Memory
+  input  logic        RegWriteOtherM,          // The other issue slot writes a register in Memory
   // Writeback stage control signals
   input  logic        StallW, FlushW,          // Stall, flush Writeback stage
   output logic        RegWriteW, IntDivW,      // Instruction writes a register, is an integer divide
+  input  logic        RegWriteOtherW,          // The other issue slot writes a register in Writeback
   output logic [2:0]  ResultSrcW,              // Select source of result to write back to register file
   // Stall during CSRs
   output logic        CSRWriteFenceM,          // CSR write or fence instruction; needs to flush the following instructions
   output logic [4:0]  RdE, RdM,                // Pipelined destination registers
+  input  logic [4:0]  RdOtherM, RdOtherW,      // The other issue lane's destination registers in Memory and Writeback
   // Forwarding controls
   output logic [4:0]  RdW                      // Register destinations in Execute, Memory, or Writeback stage
 );
 
-  logic [4:0] Rs1E;                      // pipelined register sources
   logic [6:0] OpD;                             // Opcode in Decode stage
   logic [2:0] Funct3D;                         // Funct3 field in Decode stage
   logic [6:0] Funct7D;                         // Funct7 field in Decode stage
@@ -137,7 +142,6 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   logic        FenceD, FenceE;                 // Fence instruction
   logic        SFenceVmaD;                     // sfence.vma instruction
   logic        IntDivM;                        // Integer divide instruction
-  logic        RegWriteM;                      // Instruction writes a register (needed for Hazard unit)
   logic [1:0]  CZeroD;
   logic        IFunctD, RFunctD, MFunctD;      // Detect I, R, and M-type RV32IM/Rv64IM instructions
   logic        LFunctD, SFunctD, BFunctD;      // Detect load, store, branch instructions
@@ -156,6 +160,8 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   logic        IFUPrefetchD;                   // instruction prefetch
   logic        LSUPrefetchD, LSUPrefetchE;     // data prefetch
   logic        MatchDE;                        // Match between a source register in Decode stage and destination register in Execute stage
+  logic [4:0]  Rs1E;                           // pipelined register source
+  logic        MatchD2E;                       // Same, for the other issue lane's source registers
   logic        FCvtIntStallD, MDUStallD, CSRRdStallD; // Stall due to conversion, load, multiply/divide, CSR read
   logic        FunctCZeroD;                    // Funct7 and Funct3 indicate czero.* (not including Op check)
   logic        BUW64D;                         // Indicates if it is a .uw type B instruction in Decode Stage
@@ -458,16 +464,33 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign CSRWriteFenceM = CSRWriteM | FenceM;
 
   // Forwarding logic
+  // Each issue lane instantiates this controller and forwards for itself, so the four producers are
+  // named relative to this lane: its own result in Memory and Writeback, and the other lane's.
+  // The select encoding is relative too, and datapath.sv cross-wires each lane's mux5 inputs to
+  // match: 000 no forward, 001 own Writeback, 010 own Memory, 011 other Writeback, 100 other Memory.
+  //
+  // Memory is tested before Writeback because it is the newer bundle.  Within a stage the two lanes
+  // are in the same bundle and the issue logic refuses to pair instructions with the same
+  // destination, so they can never both match and their relative order does not matter.  That stops
+  // being true if the no-WAW issue rule is ever relaxed.
+  //
+  // There is deliberately no bypass from the other lane in Execute: that would chain one ALU into
+  // the other within a cycle, and the issue logic refuses to pair instructions that would need it.
   always_comb begin
-    ForwardAE = 2'b00;
-    ForwardBE = 2'b00;
+    ForwardAE = 3'b000;
+    ForwardBE = 3'b000;
+
     if (Rs1E != 5'b0)
-      if      ((Rs1E == RdM) & RegWriteM) ForwardAE = 2'b10;
-      else if ((Rs1E == RdW) & RegWriteW) ForwardAE = 2'b01;
+      if      ((Rs1E == RdOtherM) & RegWriteOtherM) ForwardAE = 3'b100;
+      else if ((Rs1E == RdM)      & RegWriteM)      ForwardAE = 3'b010;
+      else if ((Rs1E == RdOtherW) & RegWriteOtherW) ForwardAE = 3'b011;
+      else if ((Rs1E == RdW)      & RegWriteW)      ForwardAE = 3'b001;
 
     if (Rs2E != 5'b0)
-      if      ((Rs2E == RdM) & RegWriteM) ForwardBE = 2'b10;
-      else if ((Rs2E == RdW) & RegWriteW) ForwardBE = 2'b01;
+      if      ((Rs2E == RdOtherM) & RegWriteOtherM) ForwardBE = 3'b100;
+      else if ((Rs2E == RdM)      & RegWriteM)      ForwardBE = 3'b010;
+      else if ((Rs2E == RdOtherW) & RegWriteOtherW) ForwardBE = 3'b011;
+      else if ((Rs2E == RdW)      & RegWriteW)      ForwardBE = 3'b001;
   end
 
   // Stall on dependent operations that finish in Mem Stage and can't bypass in time
@@ -479,4 +502,13 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign MDUStallD = MDUE & MatchDE; // Int mult/div is at least two cycle latency, even when coming from the FDIV
   assign FCvtIntStallD = FCvtIntE & MatchDE; // FPU to Integer transfers have single-cycle latency except fcvt
   assign StructuralStallD = LoadStallD | StoreStallD | CSRRdStallD | MDUStallD | FCvtIntStallD;
+
+  // The same hazards, for the superscalar slot 1.  Slot 1 needs this for the same reason slot 0
+  // does: a result that is not ready in the Memory stage cannot be forwarded, so the bundle has to
+  // wait a cycle.  Without it, slot 1 would forward a load's address instead of its data.
+  // This is computed here rather than in the slot 1 controller because the producer it must be
+  // compared against, RdE, belongs to the real pipeline that only this instance has.
+  // No store hazard: slot 1 never accesses memory.
+  assign MatchD2E = ((Rs1_2D == RdE) | (Rs2_2D == RdE)) & (RdE != 5'b0);
+  assign StructuralStall2D = ((MemReadE | SCE) | CSRReadE | MDUE | FCvtIntE) & MatchD2E;
 endmodule
