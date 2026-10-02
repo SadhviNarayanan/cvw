@@ -182,3 +182,6 @@ config/deriv
 sim/slack-notifier/slack-webhook-url.txt
 docs/docker/buildroot-config-src
 docs/docker/testvector-generation
+
+# PPA benchmark logs (results are tracked in benchmarks/ppa_history.csv)
+benchmarks/ppa_logs/

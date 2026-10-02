@@ -1,0 +1,5 @@
+date,githash,branch,dirty,note,config,xlen,tech,freq_mhz,maxopt,coremark_ticks,minstret,cm_per_mhz,retired,paired,dual_issue_pct,design_area,crit_path_ns,fmax_mhz,exec_time_ms,crit_unit,unit_paths
+2026-09-22 00:00,21161fa7d,superscalar_wally_decode,no,single issue - reconstructed before ppa existed,rv64gc,64,,,,3297472,2901479,3.03,,,0,,,,,,
+2026-09-27 00:00,eb22057f9,superscalar_wally_decode,no,dual issue step 3b - reconstructed before ppa existed,rv64gc,64,,,,3251829,2901479,3.08,,,2.1,,,,,,
+2026-10-01 19:37,eb22057f9,superscalar_wally_decode,no,rv32gc baseline at step 3b,rv32gc,32,sky130,10000,,2502186,2609304,3.99,2851462,513964,21.99,,,,,,
+2026-10-01 20:55,eb22057f9,superscalar_wally_decode,no,first full-core synthesis - run by hand before bin/ppa existed,rv32gc,32,sky130,10000,1,2502186,2609304,3.99,2851462,513964,21.99,2305020.43,7.222717,138.5,18.066,,(hierarchy flattened by maxopt=1)
