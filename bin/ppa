@@ -105,7 +105,10 @@ def run_synth(config, tech, maxopt):
                  f"FREQ={FREQ} MAXOPT={maxopt} MAXCORES={MAXCORES}", cwd=synthdc)
 
     # OUTPUTDIR embeds a timestamp and git hash, so it cannot be predicted: take the newest run.
-    runs = sorted((synthdc / "runs").glob("wallypipelinedcore_*"), key=lambda p: p.stat().st_mtime)
+    # Match on the config too -- the run name does not encode MAXOPT, and a bare wallypipelinedcore_*
+    # glob would happily pick up a different config's run launched alongside this one.
+    runs = sorted((synthdc / "runs").glob(f"wallypipelinedcore_{config}_*"),
+                  key=lambda p: p.stat().st_mtime)
     qor = runs[-1] / "reports" / "qor.rep" if runs else None
     if not qor or not qor.exists():
         raise RuntimeError(f"synthesis produced no qor.rep (exit {rc}):\n{out[-3000:]}")
