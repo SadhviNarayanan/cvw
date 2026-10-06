@@ -45,6 +45,7 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        LoadStallD,              // Structural stalls for load, sent to performance counters
   output logic        StoreStallD,             // load after store hazard
   output logic [4:0]  Rs1D, Rs2D, Rs2E,        // Register sources to read in Decode or Execute stage
+  output logic [1:0]  MemRWD,                  // Mem read/write decoded, for the superscalar bundle's memory hazards
   input  logic [4:0]  Rs1_2D, Rs2_2D,          // The other issue slot's register sources in Decode
   // Execute stage control signals
   input  logic        StallE, FlushE,          // Stall, flush Execute stage
@@ -83,6 +84,8 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   output logic        InvalidateICacheM, FlushDCacheM, // Invalidate I$, flush D$
   output logic        InstrValidD, InstrValidE, InstrValidM, // Instruction is valid
   output logic        FWriteIntM,              // FPU controller writes integer register file
+  output logic        IllegalBaseInstrM,       // Illegal instruction, carried to Memory so a superscalar
+                                               //   slot 1 can be replayed and trap as an unpaired instruction
   output logic        RegWriteM,               // Instruction writes a register in Memory
   input  logic        RegWriteOtherM,          // The other issue slot writes a register in Memory
   // Writeback stage control signals
@@ -109,7 +112,10 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   logic        RegWriteD, RegWriteE;           // RegWrite (register will be written)
   logic [2:0]  ResultSrcD, ResultSrcE, ResultSrcM; // Select which result to write back to register file
   logic [2:0]  PreImmSrcD;                     // Immediate source format (before amending for prefetches)
-  logic [1:0]  MemRWD;                         // Store (write to memory)
+                                                // MemRWD is an output port: the superscalar bundle's
+                                                // memory hazards in ieu.sv need both slots' Decode-stage
+                                                // read/write, since either slot may hold the memory op.
+  logic        IllegalBaseInstrE;               // Illegal instruction, pipelined towards Memory
   logic        ALUOpD;                         // 0 for address generation, 1 for all other operations (must use Funct3)
   logic        BaseW64D;                       // W64 for Base instructions specifically
   logic        BaseRegWriteD;                  // Indicates if Base instruction register write instruction
@@ -425,9 +431,9 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   flopenrc #(1)  controlregD(clk, reset, FlushD, ~StallD, 1'b1, InstrValidD);
 
   // Execute stage pipeline control register and logic
-  flopenrc #(45) controlregE(clk, reset, FlushE, ~StallE,
-                           {ALUSelectD, RegWriteD, ResultSrcD, MemRWD, JumpD, BranchD, ALUSrcAD, ALUSrcBD, ALUResultSrcD, CSRReadD, CSRWriteD, PrivilegedD, Funct3D, Funct7D, W64D, BUW64D, SubArithD, MDUD, AtomicD, InvalidateICacheD, FlushDCacheD, FenceD, CMOpD, IFUPrefetchD, LSUPrefetchD, CZeroD, InstrValidD},
-                           {ALUSelectE, IEURegWriteE, ResultSrcE, MemRWE, JumpE, BranchE, ALUSrcAE, ALUSrcBE, ALUResultSrcE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, Funct7E, W64E, UW64E, SubArithE, MDUE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, CMOpE, IFUPrefetchE, LSUPrefetchE, CZeroE, InstrValidE});
+  flopenrc #(46) controlregE(clk, reset, FlushE, ~StallE,
+                           {ALUSelectD, RegWriteD, ResultSrcD, MemRWD, JumpD, BranchD, ALUSrcAD, ALUSrcBD, ALUResultSrcD, CSRReadD, CSRWriteD, PrivilegedD, Funct3D, Funct7D, W64D, BUW64D, SubArithD, MDUD, AtomicD, InvalidateICacheD, FlushDCacheD, FenceD, CMOpD, IFUPrefetchD, LSUPrefetchD, CZeroD, IllegalBaseInstrD, InstrValidD},
+                           {ALUSelectE, IEURegWriteE, ResultSrcE, MemRWE, JumpE, BranchE, ALUSrcAE, ALUSrcBE, ALUResultSrcE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, Funct7E, W64E, UW64E, SubArithE, MDUE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, CMOpE, IFUPrefetchE, LSUPrefetchE, CZeroE, IllegalBaseInstrE, InstrValidE});
   flopenrc #(5)  Rs1EReg(clk, reset, FlushE, ~StallE, Rs1D, Rs1E);
   flopenrc #(5)  Rs2EReg(clk, reset, FlushE, ~StallE, Rs2D, Rs2E);
   flopenrc #(5)  RdEReg(clk, reset, FlushE, ~StallE, RdD, RdE);
@@ -449,9 +455,9 @@ module controller import cvw::*;  #(parameter cvw_t P) (
   assign IntDivE = MDUE & Funct3E[2]; // Integer division operation
 
   // Memory stage pipeline control register
-  flopenrc #(25) controlregM(clk, reset, FlushM, ~StallM,
-                         {RegWriteE, ResultSrcE, MemRWE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, FWriteIntE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, InstrValidE, IntDivE, CMOpE, LSUPrefetchE},
-                         {RegWriteM, ResultSrcM, MemRWM, CSRReadM, CSRWriteM, PrivilegedM, Funct3M, FWriteIntM, AtomicM, InvalidateICacheM, FlushDCacheM, FenceM, InstrValidM, IntDivM, CMOpM, LSUPrefetchM});
+  flopenrc #(26) controlregM(clk, reset, FlushM, ~StallM,
+                         {RegWriteE, ResultSrcE, MemRWE, CSRReadE, CSRWriteE, PrivilegedE, Funct3E, FWriteIntE, AtomicE, InvalidateICacheE, FlushDCacheE, FenceE, InstrValidE, IntDivE, CMOpE, LSUPrefetchE, IllegalBaseInstrE},
+                         {RegWriteM, ResultSrcM, MemRWM, CSRReadM, CSRWriteM, PrivilegedM, Funct3M, FWriteIntM, AtomicM, InvalidateICacheM, FlushDCacheM, FenceM, InstrValidM, IntDivM, CMOpM, LSUPrefetchM, IllegalBaseInstrM});
   flopenrc #(5)  RdMReg(clk, reset, FlushM, ~StallM, RdE, RdM);
 
   // Writeback stage pipeline control register

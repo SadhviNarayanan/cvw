@@ -37,7 +37,7 @@ MAXCORES = 8
 
 FIELDS = ["date", "githash", "branch", "dirty", "note", "config", "xlen", "tech", "freq_mhz",
           "maxopt", "coremark_ticks", "minstret", "cm_per_mhz", "retired", "paired",
-          "dual_issue_pct", "design_area", "crit_path_ns", "fmax_mhz", "exec_time_ms",
+          "dual_issue_pct", "cycles", "design_area", "crit_path_ns", "fmax_mhz", "exec_time_ms",
           "crit_unit", "unit_paths"]
 
 
@@ -94,6 +94,11 @@ def run_coremark(config, xlen):
         "retired": retired,
         "paired": paired,
         "dual_issue_pct": round(100 * paired / cycles, 2) if cycles else None,
+        # Whole-program cycle count.  Record it alongside Total ticks because the two answer
+        # different questions: Total ticks is MTIME elapsed across CoreMark's timed region only, and
+        # the two have been seen to move in opposite directions for the same change.  Use cycles when
+        # comparing design changes, and Total ticks as the CoreMark score.
+        "cycles": grab(r"overhead: (\d+) cycles", out, int),
     }
 
 
@@ -178,6 +183,7 @@ def compare(row, prev):
     print(f"  {'':<24}{label_prev:>18}{'this (' + row['githash'] + ')':>18}{'delta':>12}")
     for key, name in [("coremark_ticks", "coremark ticks"), ("dual_issue_pct", "dual-issue %"),
                       ("design_area", "design area"), ("fmax_mhz", "Fmax (MHz)"),
+                      ("cycles", "whole-prog cycles"),
                       ("exec_time_ms", "exec time (ms)"), ("crit_unit", "critical path in")]:
         now, before = row.get(key), (prev or {}).get(key)
         delta = "-"

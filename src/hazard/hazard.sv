@@ -28,7 +28,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 module hazard (
-  input  logic  BPWrongE, CSRWriteFenceM, RetM, TrapM,
+  input  logic  BPWrongE, CSRWriteFenceM, Replay2M, RetM, TrapM,
   input  logic  StructuralStallD,
   input  logic  LSUStallM, IFUStallF,
   input  logic  FPUStallD, ExternalStall,
@@ -69,9 +69,13 @@ module hazard (
   // Branch misprediction is found in the Execute stage and must flush the next two instructions.
   //   However, an active division operation resides in the Execute stage, and when the BP incorrectly mispredicts the divide as a taken branch, the divide must still complete
   // When a WFI is interrupted and causes a trap, it flushes the rest of the pipeline but not the W stage, because the WFI needs to commit
-  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | BPWrongE;
-  assign FlushECause = TrapM | RetM | CSRWriteFenceM |(BPWrongE & ~(DivBusyE | FDivBusyE));
-  assign FlushMCause = TrapM | RetM | CSRWriteFenceM;
+  // A superscalar replay (Replay2M) discards everything fetched after the bundle and refetches from
+  // slot 1's own PC, so it flushes exactly what a CSR write or fence does: D, E and M but not W.
+  // Leaving W alone is the point -- slot 0 is architecturally before the faulting slot 1 and completed,
+  // so it must still commit, just as a CSR write commits while the instructions behind it are flushed.
+  assign FlushDCause = TrapM | RetM | CSRWriteFenceM | Replay2M | BPWrongE;
+  assign FlushECause = TrapM | RetM | CSRWriteFenceM | Replay2M |(BPWrongE & ~(DivBusyE | FDivBusyE));
+  assign FlushMCause = TrapM | RetM | CSRWriteFenceM | Replay2M;
   assign FlushWCause = TrapM & ~WFIInterruptedM;
 
   // Stall causes

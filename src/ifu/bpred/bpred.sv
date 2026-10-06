@@ -41,6 +41,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   input  logic [P.XLEN-1:0] PCNextF,                   // Next Fetch Address
   input  logic [P.XLEN-1:0] PCNextSeqF,               // Sequential next PC: after slot 0, or after both slots when they issue together
   output logic [P.XLEN-1:0] PC1NextF,                  // Branch Predictor predicted or corrected fetch address on miss prediction
+  output logic             BPPCSrcF,                  // Predicted taken, so the next PC is the predicted target rather than sequential
   output logic [P.XLEN-1:0] NextValidPCE,              // Address of next valid instruction after the instruction in the Memory stage
 
   // Update Predictor
@@ -53,7 +54,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
 
   // Branch and jump outcome
   input  logic             InstrValidD, InstrValidE,
-  input  logic             Issue2E,                  // Slot 1 issued alongside slot 0, so the bundle is two instructions long
+  input  logic             Commit2E,                 // Slot 1 will commit alongside slot 0, so the bundle is two instructions long
   input  logic             BranchD, BranchE,
   input  logic             JumpD, JumpE,
   input  logic             PCSrcE,                    // Execution stage branch is taken
@@ -76,7 +77,6 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   logic                    BPDirWrongE;
   logic [P.XLEN-1:0]       BPBTAF, RASPCF;
 
-  logic                    BPPCSrcF;
   logic [P.XLEN-1:0]       BPPCF;
   logic [P.XLEN-1:0]       PC0NextF;
   logic [P.XLEN-1:0]       PCCorrectE;
@@ -192,7 +192,10 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // committed, so it would execute twice.
   // PCLinkE itself must not change: it is also the address a jal writes to rd and the value the
   // return-address stack pushes on a call, both of which are slot 0's.
-  assign PCFallThroughE = Issue2E ? PCLinkE + 'd4 : PCLinkE;
+  // The bundle is two instructions long only if slot 1 actually commits.  When slot 1 is killed --
+  // because slot 0 turned out to be a taken branch -- the fall-through is slot 1's own address, so
+  // this comparison against PCD makes BPWrongE fire and redirect there, re-executing it as slot 0.
+  assign PCFallThroughE = Commit2E ? PCLinkE + 'd4 : PCLinkE;
   mux2 #(P.XLEN) pccorrectemux(PCFallThroughE, IEUAdrE, PCSrcE, PCCorrectE);
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.

@@ -410,7 +410,7 @@ module testbench;
     if (P.ZICSR_SUPPORTED & TEST == "coremark")
       if (EcallFaultM) begin
         $display("Benchmark: coremark is done.");
-        $stop;
+        $finish;   // not $stop: $stop skips final blocks, so the end-of-run statistics never print
       end
     if(SelectTest) begin
       if (riscofTest) begin
@@ -849,12 +849,72 @@ module testbench;
     always_ff @(posedge clk)
       if (~reset & dut.core.ieu.c.InstrValidM & ~dut.core.ifu.StallW & ~dut.core.ifu.FlushW) begin
         Retired <= Retired + 1;
-        if (dut.core.ifu.Issue2M) RetiredPaired <= RetiredPaired + 1;
+        // Not Issue2M alone: a replayed slot 1 is still in Memory but has not retired, and will be
+        // counted when it runs again on its own.
+        if (dut.core.ifu.Issue2M & ~dut.core.Replay2M) RetiredPaired <= RetiredPaired + 1;
       end
     final
       if (Retired > 0)
         $display("issuerate: %0d instructions retired, %0d of them paired (%0d%% of cycles dual-issued)",
                  Retired + RetiredPaired, RetiredPaired, (100 * RetiredPaired) / Retired);
+  end
+
+  // Cycles that issue nothing are either stalls or flushes.  Attribute them to a cause so a change
+  // that pairs more instructions but runs slower can be diagnosed rather than guessed at.
+  if (P.ICACHE_SUPPORTED) begin : overhead
+    integer Cycles = 0, StallSlot0 = 0, StallSlot1 = 0, StallOther = 0, FlushMispredict = 0, Kills = 0;
+    integer Replays = 0, Mem2 = 0;   // slot 1 memory operations, and how many had to be replayed
+    integer LoadUse2 = 0, BundleStore = 0;  // the two bundle-level memory hazards, to confirm they fire
+    integer Replay2Ld = 0, Replay2St = 0;   // which kind of slot 1 memory operation had to be replayed
+    integer BrWithMem2 = 0;                 // taken branch in slot 0 alongside a memory operation in slot 1
+    integer ReplayStoreLeak = 0;            // a replayed slot 1 store that the LSU was not told to cancel
+    logic Slot1Stall;
+    // The slot 1 hazard only costs anything when slot 0 was not already stalling for its own reasons
+    assign Slot1Stall = dut.core.ieu.Issue2D & dut.core.ieu.StructuralStall2D
+                        & ~dut.core.ieu.StructuralStall0D;
+    always_ff @(posedge clk)
+      if (~reset) begin
+        Cycles <= Cycles + 1;
+        if (dut.core.StallD) begin
+          if (dut.core.ieu.StructuralStall0D) StallSlot0 <= StallSlot0 + 1;
+          else if (Slot1Stall)                StallSlot1 <= StallSlot1 + 1;
+          else                                StallOther <= StallOther + 1;
+        end
+        if (dut.core.ifu.BPWrongE)                             FlushMispredict <= FlushMispredict + 1;
+        if (dut.core.ifu.Kill2E & dut.core.ifu.Issue2E)         Kills <= Kills + 1;
+        if (dut.core.Mem2M & ~dut.core.StallM)                  Mem2 <= Mem2 + 1;
+        if (dut.core.Replay2M & ~dut.core.StallM)               Replays <= Replays + 1;
+        if (dut.core.ieu.LoadStall2D       & ~dut.core.StallE)  LoadUse2    <= LoadUse2 + 1;
+        if (dut.core.ieu.BundleStoreStallD & ~dut.core.StallE)  BundleStore <= BundleStore + 1;
+        if (dut.core.Replay2M & ~dut.core.StallM & dut.core.ieu.MemRW2M[1]) Replay2Ld <= Replay2Ld + 1;
+        if (dut.core.Replay2M & ~dut.core.StallM & dut.core.ieu.MemRW2M[0]) Replay2St <= Replay2St + 1;
+        if (dut.core.PCSrcE & (|dut.core.ieu.MemRW2E) & ~dut.core.StallE)   BrWithMem2 <= BrWithMem2 + 1;
+        // A replayed slot 1 store must never reach memory: the instruction is about to be refetched and
+        // trap, so the handler has to find state unmodified.  Nothing in the design cancels that write
+        // -- FlushW does it for a trap, and a replay withholds FlushW so slot 0 can commit -- so
+        // issue.sv keeps stores out of slot 1 and this must never fire.  It is here to catch anyone
+        // re-admitting them without first building the cancel path described in issue.sv's LOAD arm.
+        if (dut.core.Replay2M & dut.core.Mem2M & dut.core.ieu.MemRW2M[0] & ~dut.core.lsu.LSUFlushW) begin
+          ReplayStoreLeak <= ReplayStoreLeak + 1;
+          $error("replayed slot 1 store was not cancelled at the LSU: the write will reach memory");
+        end
+      end
+    // minstret must equal the number of instructions actually committed.  Both count from reset and
+    // use the same condition, so any difference is the counter being wrong -- which matters because
+    // a slot 1 abandoned in Execute must not be counted as retired.
+    integer Committed = 0;
+    always_ff @(posedge clk)
+      if (~reset & dut.core.ieu.c.InstrValidM & ~dut.core.StallW & ~dut.core.FlushW)
+        Committed <= Committed + 1 + ((dut.core.ifu.Issue2M & ~dut.core.Replay2M) ? 1 : 0);
+
+    final begin
+      $display("overhead: %0d cycles | stall slot0=%0d slot1=%0d other=%0d | mispredict=%0d | slot1 kills=%0d | slot1 mem=%0d replays=%0d | hazards: loaduse2=%0d bundlestore=%0d | replay ld=%0d st=%0d | branch+slot1mem=%0d | replay store leaks=%0d (must be 0)",
+               Cycles, StallSlot0, StallSlot1, StallOther, FlushMispredict, Kills, Mem2, Replays, LoadUse2, BundleStore, Replay2Ld, Replay2St, BrWithMem2, ReplayStoreLeak);
+      if (P.ZICSR_SUPPORTED)
+        $display("minstret check: committed=%0d minstret=%0d %s", Committed,
+                 dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2],
+                 (Committed == dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2]) ? "MATCH" : "*** MISMATCH ***");
+    end
   end
 
 
@@ -896,12 +956,20 @@ module testbench;
   // 3. or PC is stuck at 0
 
 
+  logic              Store2ToHostM;        // superscalar slot 1 is storing a word (to "tohost", qualified below)
   logic [P.XLEN-1:0] PCM;
   // PCM is not valid for configurations without ZICSR or branch predictor
   flopenr #(P.XLEN) PCMReg(clk, reset, ~dut.core.StallM, dut.core.PCE, PCM);
+  // A store to "tohost" ends the test.  It is recognised from slot 0 by name, but there is no Instr2M
+  // to name slot 1's instruction by, so a superscalar slot 1 store is recognised from the control the
+  // LSU acts on: a word-sized write that Mem2M says belongs to slot 1.  That is unambiguous here
+  // because the issue rules keep AMO and store-conditional, the only other funct3=010 writes, in
+  // slot 0.  Without this the test would simply never finish once stores can issue in slot 1.
+  // The jump-to-self check needs no equivalent: j is JAL, which slot 1 never holds.
+  assign Store2ToHostM = dut.core.Mem2M & dut.core.MemRWM[0] & (dut.core.MemFunct3M == 3'b010);
   always @(posedge clk) begin
     TestComplete <= ((InstrM == 32'h6f) & dut.core.InstrValidM ) |
-       ((dut.core.lsu.IEUAdrM == ProgramAddrLabelArray["tohost"] & dut.core.lsu.IEUAdrM != 0) & InstrMName == "SW"); // |
+       ((dut.core.lsu.IEUAdrM == ProgramAddrLabelArray["tohost"] & dut.core.lsu.IEUAdrM != 0) & (InstrMName == "SW" | Store2ToHostM)); // |
     //   (functionName.PCM == 0 & dut.core.ifu.InstrM == 0 & dut.core.InstrValidM & PrevPCZero));
     if (reset) PrevPCZero <= 0;
     else if (dut.core.InstrValidM) PrevPCZero <= (PCM == 0 & dut.core.ifu.InstrM == 0);
@@ -914,7 +982,10 @@ module testbench;
   DCacheFlushFSM #(P) DCacheFlushFSM(.clk, .start(DCacheFlushStart), .done(DCacheFlushDone));
 
   logic [P.XLEN-1:0] Minstret;
-  assign Minstret = testbench.dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2];
+  // The counter only exists when the privileged unit does, so the hierarchical reference has to be
+  // elaborated conditionally.  A procedural if would not do: the name is resolved either way.
+  if (P.ZICSR_SUPPORTED) assign Minstret = testbench.dut.core.priv.priv.csr.counters.HPMCOUNTER_REGW[2];
+  else                   assign Minstret = '0;   // INSTR_LIMIT is then simply never reached
   always @(negedge clk) begin
     if (INSTR_LIMIT > 0) begin
       if((Minstret != 0) & (Minstret % 'd100000 == 0)) $display("Reached %d instructions", Minstret);

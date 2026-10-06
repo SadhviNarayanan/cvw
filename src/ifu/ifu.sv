@@ -64,6 +64,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   output logic [31:0]          Instr2D,                                  // Second decoded instruction in Decode stage (superscalar slot 1)
   output logic                 Issue2D, Issue2E,                         // Slot 1 issues alongside slot 0 in Decode / Execute
   output logic                 Issue2M, Issue2W,                         // ... and in Memory / Writeback, where it commits
+  input  logic                 Replay2M,                                 // Slot 1's memory operation faulted; refetch it alone
   output logic [31:0]          InstrM,                                   // The decoded instruction in Memory stage
   output logic [31:0]          InstrOrigM,                               // Original compressed or uncompressed instruction in Memory stage for Illegal Instruction XTVAL
   output logic [P.XLEN-1:0]    PCM,                                      // Memory stage instruction address
@@ -123,6 +124,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:2]           PCPlus4F;                                 // PCPlus4F is always PCF + 4.  Fancy way to compute PCPlus2or4F
   logic [P.XLEN-1:0]           PCD;                                      // Decode stage instruction address
   logic [P.XLEN-1:0]           NextValidPCE;                             // The PC of the next valid instruction in the pipeline after  csr write or fence
+  logic [P.XLEN-1:0]           RedirectPCM;                              // Memory stage redirect target: csr write / fence, or a slot 1 replay
   logic [P.XLEN-1:0]           PCF;                                      // Fetch stage instruction address
   logic [P.PA_BITS-1:0]        PCPF;                                     // Physical address after address translation
   logic [P.XLEN+1:0]           PCFExt;
@@ -144,6 +146,9 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0]           Instr2PCD;                                // Slot 1 instruction address in the Decode stage
   logic                        Instr2ValidD;                             // Slot 1 in Decode holds a complete instruction
   logic                        Issue2F;                                  // Both slots may issue together
+  logic                        Kill2E;                                   // Slot 1 issued but must not commit
+  logic                        Commit2E;                                 // Slot 1 issued and will commit
+  logic                        BPPCSrcF;                                 // Branch predictor says this fetch is a taken branch or jump
   logic                        SelSpillF;                                // Fetching the second half of an instruction that spills across a line
 
   logic [1:0]                  IFURWF;                                   // IFU alreays read IFURWF = 10
@@ -391,7 +396,7 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Decide in Fetch whether both slots may issue together.  This has to happen here rather than in
   // Decode because the PC advance below depends on it: a bundle of two advances the PC by both
   // lengths at once.  When Issue2F is low the core behaves exactly as single-issue Wally.
-  issue issue(.Instr0F(InstrRawF), .Instr1F(Instr2RawF), .Instr2ValidF, .Issue2F);
+  issue #(P) issue(.Instr0F(InstrRawF), .Instr1F(Instr2RawF), .Instr2ValidF, .BPPCSrcF, .Issue2F);
 
   assign IFUCacheBusStallF = ICacheStallF | BusStall;
   // The fetch side owns the stall for an unresolved ITLB miss / A update: the pipeline holds until the walker
@@ -413,9 +418,14 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // PCNextF logic
   ////////////////////////////////////////////////////////////////////////////////////////////////
 
-  if(P.ZICSR_SUPPORTED | P.ZIFENCEI_SUPPORTED)
-    mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(NextValidPCE), .s(CSRWriteFenceM),.y(PC2NextF));
-  else assign PC2NextF = PC1NextF;
+  // Both redirects here come from the Memory stage.  A replay sends fetch back to slot 1's own PC,
+  // which is PCM + 4 because the issue rules require both slots of a bundle to be uncompressed.  The
+  // two selects cannot be high together: CSRWriteFenceM means slot 0 is a CSR write or a fence, and
+  // those are SYSTEM and MISC_MEM, which Slot0CanPairF refuses to pair -- so no priority is needed.
+  if(P.ZICSR_SUPPORTED | P.ZIFENCEI_SUPPORTED) begin
+    mux2 #(P.XLEN) pcredirectmux(NextValidPCE, PCM + 'd4, Replay2M, RedirectPCM);
+    mux2 #(P.XLEN) pcmux2(.d0(PC1NextF), .d1(RedirectPCM), .s(CSRWriteFenceM | Replay2M),.y(PC2NextF));
+  end else assign PC2NextF = PC1NextF;
 
   mux3 #(P.XLEN) pcmux3(PC2NextF, EPCM, TrapVectorM, {TrapM, RetM}, UnalignedPCNextF);
   mux2 #(P.XLEN) pcresetmux({UnalignedPCNextF[P.XLEN-1:1], 1'b0}, P.RESET_VECTOR[P.XLEN-1:0], reset, PCNextF);
@@ -449,14 +459,18 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   if (P.BPRED_SUPPORTED) begin : bpred
     bpred #(P) bpred(.clk, .reset,
                 .StallF, .StallD, .StallE, .StallM, .StallW,
-                .FlushD, .FlushE, .FlushM, .FlushW, .InstrValidD, .InstrValidE, .Issue2E,
+                .FlushD, .FlushE, .FlushM, .FlushW, .InstrValidD, .InstrValidE, .Commit2E,
                 .BranchD, .BranchE, .JumpD, .JumpE,
-                .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .PCE, .PCM, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCF, .NextValidPCE,
+                .InstrD, .PCNextF, .PCNextSeqF, .PC1NextF, .BPPCSrcF, .PCE, .PCM, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCF, .NextValidPCE,
                 .PCD, .PCLinkE, .IClassM, .BPWrongE, .PostSpillInstrRawF, .BPWrongM,
                 .BPDirWrongM, .BTAWrongM, .RASPredPCWrongM, .IClassWrongM);
 
   end else begin : bpred
     mux2 #(P.XLEN) pcmux1(.d0(PCNextSeqF), .d1(IEUAdrE), .s(PCSrcE), .y(PC1NextF));
+    // No predictor: the next PC is sequential until a branch resolves taken in Execute, which is the
+    // same behaviour as predicting not-taken.  So branches may pair here too, and Kill2E catches the
+    // taken case.  BPPCSrcF still needs a driver in this branch because bpred is not instantiated.
+    assign BPPCSrcF = 1'b0;
     logic BranchM, JumpM, BranchW, JumpW;
     logic CallD, CallE, CallM, CallW;
     logic ReturnD, ReturnE, ReturnM, ReturnW;
@@ -516,10 +530,19 @@ module ifu import cvw::*;  #(parameter cvw_t P) (
   // Issue2E is a validity bit, not data: on a flush slot 1 must not issue, so it is cleared
   // (unlike PCE above, which may safely go stale because InstrValidE tracks validity separately).
   flopenrc #(1)     Issue2EReg(clk, reset, FlushE, ~StallE, Issue2D, Issue2E);
+  // Slot 1 may have to be abandoned after it has already issued: slot 0 can be a conditional branch,
+  // and if it resolves taken then slot 1, the fall-through, is on the wrong path.  PCSrcE is that
+  // resolved outcome (JumpE | BranchE & BranchTakenE), so it is exactly the kill condition.
+  // This gates the register's *input*.  FlushE would be the wrong mechanism: it stops the Decode
+  // instruction from entering Execute and does nothing to an instruction already in Execute.
+  assign Kill2E   = PCSrcE;
+  assign Commit2E = Issue2E & ~Kill2E;
   // Carrying Issue2 to Writeback is what gates slot 1's register write.  Because these clear on
   // flush, a trap or a misprediction that flushes the bundle also stops slot 1 from committing.
-  flopenrc #(1)     Issue2MReg(clk, reset, FlushM, ~StallM, Issue2E, Issue2M);
-  flopenrc #(1)     Issue2WReg(clk, reset, FlushW, ~StallW, Issue2M, Issue2W);
+  // Replay2M is the Memory-stage equivalent of Kill2E: slot 1's memory operation faulted, so it is
+  // abandoned here and refetched to run alone.  It cannot use FlushW, which would also discard slot 0.
+  flopenrc #(1)     Issue2MReg(clk, reset, FlushM, ~StallM, Commit2E, Issue2M);
+  flopenrc #(1)     Issue2WReg(clk, reset, FlushW, ~StallW, Issue2M & ~Replay2M, Issue2W);
 
   // InstrM is only needed with CSRs or atomic operations
   if (P.ZICSR_SUPPORTED | P.ZAAMO_SUPPORTED | P.ZALRSC_SUPPORTED) begin

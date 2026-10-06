@@ -72,6 +72,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          InstrValidD, InstrValidE, InstrValidM;
   logic                          InstrMisalignedFaultM;
   logic                          IllegalBaseInstrD, IllegalFPUInstrD, IllegalIEUFPUInstrD;
+  logic                          Mem2M;                           // The bundle's memory operation is slot 1's
+  logic                          Illegal2M;                       // ... or slot 1 is an illegal instruction
+  logic                          Replay2M;                        // ... either way slot 1 must re-run alone
   logic                          InstrPageFaultF, LoadPageFaultM, StoreAmoPageFaultM;
   logic                          LoadMisalignedFaultM, LoadAccessFaultM;
   logic                          StoreAmoMisalignedFaultM, StoreAmoAccessFaultM;
@@ -128,8 +131,10 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          LSUStallM;
 
   // cpu lsu interface
-  logic [2:0]                    Funct3M;
-  logic [P.XLEN-1:0]             IEUAdrE;
+  logic [2:0]                    Funct3M;                         // slot 0's funct3, to the MDU and FPU
+  logic [2:0]                    MemFunct3M;                      // the bundle's memory funct3, to the LSU
+  logic [P.XLEN-1:0]             IEUAdrE;                         // slot 0's branch / jump target, to the IFU
+  logic [P.XLEN-1:0]             LSUAdrE;                         // the bundle's memory address, to the LSU
   logic [P.XLEN-1:0]             WriteDataM;
   logic [P.XLEN-1:0]             IEUAdrM;
   logic [P.XLEN-1:0]             IEUAdrxTvalM;
@@ -187,7 +192,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .PCLinkE, .PCSrcE, .IEUAdrE, .IEUAdrM, .PCE, .BPWrongE,  .BPWrongM,
     // Mem
     .CommittedF, .EPCM, .TrapVectorM, .RetM, .TrapM, .InvalidateICacheM, .CSRWriteFenceM,
-    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
+    .InstrD, .Instr2D, .Issue2D, .Issue2E, .Issue2M, .Issue2W, .Replay2M, .InstrM, .InstrOrigM, .PCM, .PCSpillM, .IClassM, .BPDirWrongM,
     .BTAWrongM, .RASPredPCWrongM, .IClassWrongM,
     // Faults out
     .IllegalBaseInstrD, .IllegalFPUInstrD, .InstrPageFaultF, .IllegalIEUFPUInstrD, .InstrMisalignedFaultM,
@@ -201,9 +206,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   // integer execution unit: integer register file, datapath and controller
   ieu #(P) ieu(.clk, .reset,
      // Decode Stage interface
-     .InstrD, .Instr2D, .Issue2D, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
+     .InstrD, .Instr2D, .Issue2D, .Issue2M, .Issue2W, .Mem2M, .Illegal2M, .STATUS_FS, .ENVCFG_CBE, .IllegalIEUFPUInstrD, .IllegalBaseInstrD,
      // Execute Stage interface
-     .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .IntDivE, .W64E,
+     .PCE, .PCLinkE, .FWriteIntE, .FCvtIntE, .IEUAdrE, .LSUAdrE, .IntDivE, .W64E,
      .Funct3E, .ForwardedSrcAE, .ForwardedSrcBE, .MDUActiveE, .CMOpM, .IFUPrefetchE, .LSUPrefetchM,
      // Memory stage interface
      .SquashSCW,  // from LSU
@@ -211,7 +216,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
      .MemRWM,     // read/write control goes to LSU
      .AtomicM,    // atomic control goes to LSU
      .WriteDataM, // Write data to LSU
-     .Funct3M,    // size and signedness to LSU
+     .Funct3M, .MemFunct3M,    // funct3 to MDU/FPU; size and signedness to LSU
      .SrcAM,      // to privilege and fpu
      .RdE, .RdM, .FIntResM, .FlushDCacheM,
      .BranchD, .BranchE, .JumpD, .JumpE,
@@ -226,9 +231,9 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   lsu #(P) lsu(
     .clk, .reset, .StallM, .FlushM, .StallW, .FlushW,
     // CPU interface
-    .MemRWE, .MemRWM, .Funct3M, .Funct7M(InstrM[31:25]), .AtomicM,
+    .MemRWE, .MemRWM, .Funct3M(MemFunct3M), .Funct7M(InstrM[31:25]), .AtomicM,
     .CommittedM, .DCacheMiss, .DCacheAccess, .SquashSCW,
-    .FpLoadStoreM, .FWriteDataM, .IEUAdrE, .IEUAdrM, .WriteDataM,
+    .FpLoadStoreM, .FWriteDataM, .IEUAdrE(LSUAdrE), .IEUAdrM, .WriteDataM,
     .ReadDataW, .FlushDCacheM, .CMOpM, .LSUPrefetchM,
     // connected to ahb (all stay the same)
     .LSUHADDR,  .HRDATA, .LSUHWDATA, .LSUHWSTRB, .LSUHSIZE,
@@ -276,9 +281,30 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
             HWSTRB, HWRITE, HSIZE, HBURST, HPROT, HTRANS, HMASTLOCK} = '0;
   end
 
+  // Superscalar replay.  The privileged unit holds one PC, cause and tval for the Memory stage, so it
+  // cannot describe a trap taken by slot 1 while slot 0 occupies that stage.  Rather than give it a
+  // second set, a faulting slot 1 is abandoned and re-fetched on its own: the trap below is suppressed,
+  // slot 0 (which is architecturally earlier and completed) commits, and the IFU redirects to slot 1's
+  // own PC.  Slot 1 then runs as an ordinary unpaired instruction, faults again, and traps through the
+  // existing single-issue path, so mepc, mcause and mtval are right with no change to privileged.sv.
+  // Guarded by ZICSR_SUPPORTED because without a privileged unit no trap is ever taken, and replaying
+  // a fault nothing will service would re-fetch the same instruction forever.
+  // Slot 1 has exactly two ways to need a trap -- a faulting memory operation, and an illegal
+  // instruction -- and both are the same problem: a trap the Memory stage cannot describe.  So both
+  // take the one replay path.
+  // Only a load can bring the memory half of this about, because issue.sv keeps stores in slot 0.  A
+  // replayed store would need its write cancelled, and a replay cannot do that: the only thing that
+  // cancels a write here is FlushW, which a replay withholds so that slot 0 can still commit.  See the
+  // LOAD arm of issue.sv for what admitting stores would require.  A replayed load needs nothing of
+  // the sort -- it writes no memory, and Issue2W already stops its register write.
+  assign Replay2M = P.ZICSR_SUPPORTED &
+                    ((Mem2M & (LoadMisalignedFaultM | LoadAccessFaultM | LoadPageFaultM |
+                               StoreAmoMisalignedFaultM | StoreAmoAccessFaultM | StoreAmoPageFaultM))
+                     | Illegal2M);
+
   // global stall and flush control
   hazard hzu(
-    .BPWrongE, .CSRWriteFenceM, .RetM, .TrapM,
+    .BPWrongE, .CSRWriteFenceM, .Replay2M, .RetM, .TrapM,
     .StructuralStallD,
     .LSUStallM, .IFUStallF,
     .FPUStallD, .ExternalStall,
@@ -300,13 +326,17 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
       .FRegWriteM, .LoadStallD, .StoreStallD,
       .BPDirWrongM, .BTAWrongM, .BPWrongM,
       .RASPredPCWrongM, .IClassWrongM, .DivBusyE, .FDivBusyE,
-      .IClassM, .Issue2M, .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
-      .InstrPageFaultF, .LoadPageFaultM, .StoreAmoPageFaultM,
+      // Issue2M reaches the privileged unit only to increment minstret for slot 1.  A replayed slot 1
+      // has not retired -- it is about to run again on its own -- so it must not be counted here.
+      .IClassM, .Issue2M(Issue2M & ~Replay2M), .DCacheMiss, .DCacheAccess, .ICacheMiss, .ICacheAccess, .PrivilegedM,
+      // The six data faults are masked on replay: slot 1 raised them, but this stage describes slot 0,
+      // so the trap is deferred until slot 1 re-runs on its own and can be described correctly.
+      .InstrPageFaultF, .LoadPageFaultM(LoadPageFaultM & ~Replay2M), .StoreAmoPageFaultM(StoreAmoPageFaultM & ~Replay2M),
       .InstrMisalignedFaultM, .IllegalIEUFPUInstrD,
-      .LoadMisalignedFaultM, .StoreAmoMisalignedFaultM,
+      .LoadMisalignedFaultM(LoadMisalignedFaultM & ~Replay2M), .StoreAmoMisalignedFaultM(StoreAmoMisalignedFaultM & ~Replay2M),
       .MTimerInt, .MExtInt, .SExtInt, .MSwInt,
       .MTIME_CLINT, .IEUAdrxTvalM, .SetFflagsM,
-      .InstrAccessFaultF, .HPTWInstrAccessFaultF(HPTWInstrAccessFaultHeldF), .HPTWInstrPageFaultF(HPTWInstrPageFaultHeldF), .LoadAccessFaultM, .StoreAmoAccessFaultM, .SelHPTW,
+      .InstrAccessFaultF, .HPTWInstrAccessFaultF(HPTWInstrAccessFaultHeldF), .HPTWInstrPageFaultF(HPTWInstrPageFaultHeldF), .LoadAccessFaultM(LoadAccessFaultM & ~Replay2M), .StoreAmoAccessFaultM(StoreAmoAccessFaultM & ~Replay2M), .SelHPTW,
       .PrivilegeModeW, .SATP_REGW,
       .STATUS_MXR, .STATUS_SUM, .STATUS_MPRV, .STATUS_MPP, .STATUS_FS,
       .PMPCFG_ARRAY_REGW, .PMPADDR_ARRAY_REGW,

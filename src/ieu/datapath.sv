@@ -52,6 +52,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic [1:0]        CZero2E,                 // Slot 1: czero.* active
   input  logic              RegWrite2W,              // Slot 1: commits a register write this cycle
   input  logic [4:0]        Rd2W,                    // Slot 1: destination register in Writeback
+  input  logic              Mem2E,                   // Slot 1: holds the bundle's memory operation
+  input  logic [2:0]        ResultSrc2W,             // Slot 1: selects source of its writeback value
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
   input  logic [P.XLEN-1:0] PCLinkE,                 // PC + 4 (of instruction in Execute stage)
@@ -72,7 +74,8 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              BMUActiveE,              // Bit manipulation instruction being executed
   input  logic [1:0]        CZeroE,                  // {czero.nez, czero.eqz} instructions active
   output logic [1:0]        FlagsE,                  // Comparison flags ({eq, lt})
-  output logic [P.XLEN-1:0] IEUAdrE,                 // Address computed by ALU
+  output logic [P.XLEN-1:0] IEUAdrE,                 // Address computed by ALU: slot 0's branch/jump target
+  output logic [P.XLEN-1:0] LSUAdrE,                 // Address computed by ALU: memory address, from either slot
   output logic [P.XLEN-1:0] ForwardedSrcAE, ForwardedSrcBE, // ALU sources before the mux chooses between them and PCE to put in srcA/B
   // Memory stage signals
   input  logic              StallM, FlushM,          // Stall, flush Memory stage
@@ -103,9 +106,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] R1_2E, R2_2E, ImmExt2E;         // Slot 1: the same, in Execute
   logic [P.XLEN-1:0] ForwardedSrc2AE, ForwardedSrc2BE; // Slot 1: operands after forwarding
   logic [P.XLEN-1:0] SrcA2E, SrcB2E;                 // Slot 1: ALU inputs
-  logic [P.XLEN-1:0] ALUResult2E, IEUAdrRaw2E;       // Slot 1: ALU outputs
+  logic [P.XLEN-1:0] ALUResult2E, IEUAdr2E;          // Slot 1: ALU outputs.  The sum needs no bit-0 mask
+                                                     //   as slot 0's does, because slot 1 cannot jump.
   logic [P.XLEN-1:0] AltResult2E, IEUResult2E;       // Slot 1: result in Execute
-  logic [P.XLEN-1:0] IEUResult2M, ResultW2;          // Slot 1: result in Memory, and written back
+  logic [P.XLEN-1:0] IEUResult2M, IEUResult2W;       // Slot 1: result in Memory, and in Writeback
+  logic [P.XLEN-1:0] ResultW2;                       // Slot 1: value written back
   logic [1:0]        Flags2E;                        // Slot 1: comparator flags (unused until slot 1 may branch)
   // Execute stage signals
   logic [P.XLEN-1:0] R1E, R2E;                       // Source operands read from register file
@@ -113,6 +118,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] SrcAE, SrcBE;                   // ALU operands
   logic [P.XLEN-1:0] ALUResultE, AltResultE, IEUResultE; // ALU result, Alternative result (ImmExtE or PC+4), result of execution stage
   logic [P.XLEN-1:0] IEUAdrRawE;                     // ALU sum before clearing bit 0 of a jump target
+  logic [P.XLEN-1:0] WriteDataE;                     // Store data of whichever slot holds the memory operation
   // Memory stage signals
   logic [P.XLEN-1:0] IEUResultM;                     // Result from execution stage
   logic [P.XLEN-1:0] IFResultM;                      // Result from either IEU or single-cycle FPU op writing an integer register
@@ -162,23 +168,39 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  srcamux2(ForwardedSrc2AE, PCLinkE, ALUSrcA2E, SrcA2E);
   mux2  #(P.XLEN)  srcbmux2(ForwardedSrc2BE, ImmExt2E, ALUSrcB2E, SrcB2E);
   alu   #(P)       alu2(SrcA2E, SrcB2E, W64_2E, UW64_2E, SubArith2E, ALUSelect2E, BSelect2E, ZBBSelect2E,
-                        Funct3_2E, Funct7_2E, Rs2_2E, BALUControl2E, BMUActive2E, CZero2E, ALUResult2E, IEUAdrRaw2E);
+                        Funct3_2E, Funct7_2E, Rs2_2E, BALUControl2E, BMUActive2E, CZero2E, ALUResult2E, IEUAdr2E);
   // Slot 0's altresultmux also selects PCLinkE as a jump's link value.  Slot 1 cannot jump under the
   // issue rules, and its link value would be PCLinkE + 4 rather than PCLinkE, so that input is left
   // out rather than wired to a value that is wrong but currently unreachable.
   assign AltResult2E = ImmExt2E;                     // lui writes its immediate straight through
   mux2  #(P.XLEN)  ieuresultmux2(ALUResult2E, AltResult2E, ALUResultSrc2E, IEUResult2E);
 
-  // Slot 1 Memory and Writeback.  Slot 0 needs a mux5 in Writeback to choose between the ALU, a
-  // load, a CSR read, the multiply/divide unit and a store-conditional; slot 1 can only be an ALU
-  // operation, so its result just flows through.
+  // The address handed to the load/store unit, selected from whichever slot holds the bundle's one
+  // memory operation.  Each slot's ALU already computes its own sum, so this is only a choice of which
+  // one the LSU listens to.
+  //
+  // It is deliberately a separate output from IEUAdrE rather than a mux on it.  A single instruction
+  // is never both a control transfer and a memory access -- srcamux steers its one adder to PC+imm or
+  // to rs1+imm -- which is why slot 0 can send one net to both the IFU and the LSU.  That stops being
+  // true across slots: a taken branch in slot 0 needs its target at the IFU in the very cycle slot 1
+  // needs its address at the LSU.  Keeping the nets apart lets both happen, and leaves the IFU's
+  // redirect path exactly as it was.
+  mux2  #(P.XLEN)  lsuadrmux(IEUAdrE, IEUAdr2E, Mem2E, LSUAdrE);
+
+  // Slot 1 Memory and Writeback.  Slot 0 needs a mux5 in Writeback to choose between the ALU, a load,
+  // a CSR read, the multiply/divide unit and a store-conditional.  Slot 1 can only be an ALU operation
+  // or a load, so it needs just two of those, selected by the same ResultSrc encoding slot 0 uses.
   flopenrc #(P.XLEN) IEUResult2MReg(clk, reset, FlushM, ~StallM, IEUResult2E, IEUResult2M);
-  flopenrc #(P.XLEN) IEUResult2WReg(clk, reset, FlushW, ~StallW, IEUResult2M, ResultW2);
+  flopenrc #(P.XLEN) IEUResult2WReg(clk, reset, FlushW, ~StallW, IEUResult2M, IEUResult2W);
+  mux2  #(P.XLEN)  resultmux2W(IEUResult2W, ReadDataW, ResultSrc2W == 3'b001, ResultW2);
 
   // Memory stage pipeline register
   flopenrc #(P.XLEN) SrcAMReg(clk, reset, FlushM, ~StallM, SrcAE, SrcAM);
   flopenrc #(P.XLEN) IEUResultMReg(clk, reset, FlushM, ~StallM, IEUResultE, IEUResultM);
-  flopenrc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, ForwardedSrcBE, WriteDataM);
+  // A store's data is rs2 after forwarding, so it comes from whichever slot's forwarding muxes hold
+  // the memory operation.  The lane choice is made before the register, so Memory sees one value.
+  mux2  #(P.XLEN)  writedatamux(ForwardedSrcBE, ForwardedSrc2BE, Mem2E, WriteDataE);
+  flopenrc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, WriteDataE, WriteDataM);
 
   // Writeback stage pipeline register and logic
   flopenrc #(P.XLEN) IFResultWReg(clk, reset, FlushW, ~StallW, IFResultM, IFResultW);
