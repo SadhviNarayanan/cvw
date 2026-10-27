@@ -62,6 +62,7 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   output logic [P.XLEN-1:0] MDUSrcAE, MDUSrcBE,      // Operands to the MDU, from whichever slot holds its operation
   input  logic [1:0]        LateSelA2E, LateSelB2E,  // Slot 1: late ALU operand source (00 own, 01 slot 0, 10 ResultW, 11 ResultW2)
   input  logic              LateBrE,                 // The late ALU compares slot 0's branch operands instead
+  input  logic              Late0RawE,               // ... or computes slot 0's ALU operation instead (ieu.sv)
   output logic [2:0]        LateFlagsM,              // ... giving {eq, lt, ltu}
   // Execute stage signals
   input  logic [P.XLEN-1:0] PCE,                     // PC in Execute stage
@@ -127,6 +128,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [1:0]        LateSelA2M, LateSelB2M;         // Slot 1: where the late ALU takes each operand from
   logic              Late2M;                         // Slot 1 executes on the late ALU
   logic              LateBrM;                        // The late ALU compares slot 0's branch instead
+  logic              Late0RawM, Late0M;              // The late ALU was given slot 0's ALU operation / and computes it
+  logic [2:0]        LateALUSelectE, LateFunct3E;    // Late ALU control, from whichever slot uses it
+  logic              LateSubArithE, LateW64E;
+  logic [P.XLEN-1:0] IFResultLateM;                  // Slot 0's result entering Writeback, the late ALU's if slot 0 was late
   logic [P.XLEN-1:0] LateInA2E, LateInB2E;           // What the late ALU's operand registers capture
   logic [P.XLEN-1:0] LateSum2M;                      // The late ALU's adder output
   logic              LateSignA, LateSignB, LateNeg;  // ... and the signs the branch flags are formed from
@@ -247,14 +252,44 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   //
   // For a late branch the same registers carry slot 0's branch operands instead -- its rs1 and rs2 after
   // forwarding, which is what the comparator in Execute would have used -- and the late ALU subtracts.
-  mux2  #(P.XLEN)  lateinamux(SrcA2E, ForwardedSrcAE, LateBrE, LateInA2E);
-  mux2  #(P.XLEN)  lateinbmux(SrcB2E, ForwardedSrcBE, LateBrE, LateInB2E);
+  //
+  // A late slot 0 (ieu.sv) uses the late ALU too.  Its operands reach it in two steps, as slot 1's do:
+  //   bundle A:  lw   a5, 0(a0)
+  //   bundle B:  addi a4, a5, 3     <- slot 0 is late
+  //   1. End of Execute (lateinamux): store what is available now.  Operand A is a5, still wrong -- the
+  //      load is only in Memory -- and operand B is the immediate 3, which is right.
+  //   2. Memory (latesrcamux, below): replace what came too late.  LateSelA2M = 10 swaps the wrong a5
+  //      for ResultW, the loaded a5 now in Writeback; LateSelB2M = 00 keeps the 3.
+  // Step 1 is needed because only the slow operand comes from Writeback; the other one (an immediate,
+  // or a register that was ready in Execute) must be carried from Execute to Memory.
+  //
+  // Names: LateInA2E is late ALU operand A as chosen in Execute, SrcA2M the same value stored in
+  // Memory, LateSrcA2M it after the swap.  The "2" dates from when only slot 1 used the late ALU.
+  //
+  // What step 1 stores depends on who uses the late ALU (at most one instruction per bundle):
+  //   slot 1 (normal)   slot 1's ALU inputs              SrcA2E, SrcB2E        slot 1's operation
+  //   late branch       slot 0's two register values     ForwardedSrcAE/BE     subtract (LateBrM)
+  //   late slot 0       slot 0's ALU inputs              SrcAE, SrcBE          slot 0's operation
+  // A late slot 0 takes SrcAE/SrcBE rather than ForwardedSrcAE/BE because its operand may be the PC or
+  // an immediate, which SrcAE/SrcBE already include.  LateBrE and Late0RawE are never both set.
+  mux3  #(P.XLEN)  lateinamux(SrcA2E, ForwardedSrcAE, SrcAE, {Late0RawE, LateBrE}, LateInA2E);
+  mux3  #(P.XLEN)  lateinbmux(SrcB2E, ForwardedSrcBE, SrcBE, {Late0RawE, LateBrE}, LateInB2E);
+  // The operation travels with the operands: slot 0's for a late slot 0, otherwise slot 1's.
+  mux2  #(8)       latectrlmux({ALUSelect2E, Funct3_2E, SubArith2E, W64_2E},          // slot 1's operation
+                               {ALUSelectE,  Funct3E,   SubArithE,  W64E},            // slot 0's operation
+                               Late0RawE, {LateALUSelectE, LateFunct3E, LateSubArithE, LateW64E});
   flopenrc #(P.XLEN) SrcA2MReg(clk, reset, FlushM, ~StallM, LateInA2E, SrcA2M);
   flopenrc #(P.XLEN) SrcB2MReg(clk, reset, FlushM, ~StallM, LateInB2E, SrcB2M);
-  flopenrc #(13)     LateCtrl2MReg(clk, reset, FlushM, ~StallM,
-                                   {ALUSelect2E, Funct3_2E, SubArith2E, W64_2E, LateSelA2E, LateSelB2E, LateBrE},
-                                   {ALUSelect2M, Funct3_2M, SubArith2M, W64_2M, LateSelA2M, LateSelB2M, LateBrM});
-  assign Late2M = ~LateBrM & (|LateSelA2M | |LateSelB2M);
+  flopenrc #(14)     LateCtrl2MReg(clk, reset, FlushM, ~StallM,
+                                   {LateALUSelectE, LateFunct3E, LateSubArithE, LateW64E, LateSelA2E, LateSelB2E, LateBrE, Late0RawE},
+                                   {ALUSelect2M, Funct3_2M, SubArith2M, W64_2M, LateSelA2M, LateSelB2M, LateBrM, Late0RawM});
+
+  // Whose result the late ALU produced:
+  //   Late0M  slot 0's: it was sent late and an operand really was replaced.  If nothing was replaced
+  //           (a false match on an immediate field), slot 0's Execute result is right and is used.
+  //   Late2M  slot 1's: only when neither a late branch nor a late slot 0 used the late ALU.
+  assign Late0M = Late0RawM & (|LateSelA2M | |LateSelB2M);
+  assign Late2M = ~LateBrM & ~Late0RawM & (|LateSelA2M | |LateSelB2M);
   mux4  #(P.XLEN)  latesrcamux(SrcA2M, IEUResultM, ResultW, ResultW2, LateSelA2M, LateSrcA2M);
   mux4  #(P.XLEN)  latesrcbmux(SrcB2M, IEUResultM, ResultW, ResultW2, LateSelB2M, LateSrcB2M);
   alu   #(P)       latealu(.A(LateSrcA2M), .B(LateSrcB2M), .W64(W64_2M & ~LateBrM), .UW64(1'b0),
@@ -298,7 +333,15 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   flopenrc #(P.XLEN) WriteDataMReg(clk, reset, FlushM, ~StallM, WriteDataE, WriteDataM);
 
   // Writeback stage pipeline register and logic
-  flopenrc #(P.XLEN) IFResultWReg(clk, reset, FlushW, ~StallW, IFResultM, IFResultW);
+  // Slot 0's Writeback register normally stores IFResultM, slot 0's Execute result.  For a late slot 0
+  // (Late0M) that result is wrong, so it stores the late ALU's result instead; next cycle that is
+  // ResultW, written to the register file and forwarded from Writeback.
+  // The late result does not go into IFResultM itself: IFResultM forwards to the next bundle's Execute
+  // ALU, and putting the late ALU in front of it would chain two ALUs in one cycle -- the critical path
+  // the late ALU exists to avoid.  So a consumer in the next bundle goes late too (takes ResultW in
+  // Memory) or stalls a cycle (LateStall0D in ieu.sv).
+  mux2  #(P.XLEN)  latewbmux(IFResultM, LateResult2M, Late0M, IFResultLateM);
+  flopenrc #(P.XLEN) IFResultWReg(clk, reset, FlushW, ~StallW, IFResultLateM, IFResultW);
 
   // floating point inputs: FIntResM comes from fclass, fcmp, fmv; FCvtIntResW comes from fcvt
   if (P.F_SUPPORTED) begin : fpmux

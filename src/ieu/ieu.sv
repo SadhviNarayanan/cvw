@@ -177,6 +177,14 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic       StructuralStall0GD;                             // Slot 0's own stalls, less those a late branch avoids
   logic       LateStall2D;                                    // A late slot 1's result is not ready to forward yet
 
+  // Late slot 0: a slot 0 ALU operation whose operand the bundle ahead produces too late, run on the
+  // late ALU in Memory instead of stalling it in Decode, as a late branch is.
+  logic       LateOK0D;                                       // Slot 0 is an operation the late ALU implements
+  logic       Late0D, Late0RawE;                              // Slot 0 is to run late / was sent late
+  logic       Late0E;                                         // ... and some operand really is substituted
+  logic       Slow0E;                                         // Slot 0 in Execute has a result not ready in Memory
+  logic       LateStall0D;                                    // A late slot 0's result is not ready to forward yet
+
   // Slot 1 Memory/Writeback-stage signals.  The core has one load/store unit, so at most one slot of
   // a bundle may hold a memory operation; Mem2E/Mem2M say it is slot 1's and steer the LSU's inputs
   // to lane 2.  c2 pipelines its own control to M and W with the real StallM/FlushM, exactly as c does.
@@ -345,11 +353,14 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // pipeline guarantees except when Execute is held while Memory advances (CaptureE): then the producer
   // retires first, but datapath.sv's operand capture has meanwhile picked its value up in Execute, so
   // these bits are cleared and slot 1 takes its operands as captured.
+  //
+  // A late slot 0 (below) is a slow producer too: its result first appears in ResultW.
+  assign Slow0E   = SlowResult0E | Late0E;
   assign Slow2E   = MemRW2E[1] | MDUActive2E | Late2E;
   assign LateWA2D = ((Rd2E != 5'b0) & (Rs1_2D == Rd2E)) ? {2{Slow2E}} :
-                    ((RdE  != 5'b0) & (Rs1_2D == RdE) & SlowResult0E) ? 2'b10 : 2'b00;
+                    ((RdE  != 5'b0) & (Rs1_2D == RdE) & Slow0E) ? 2'b10 : 2'b00;
   assign LateWB2D = ((Rd2E != 5'b0) & (Rs2_2D == Rd2E)) ? {2{Slow2E}} :
-                    ((RdE  != 5'b0) & (Rs2_2D == RdE) & SlowResult0E) ? 2'b10 : 2'b00;
+                    ((RdE  != 5'b0) & (Rs2_2D == RdE) & Slow0E) ? 2'b10 : 2'b00;
   assign CaptureE = StallE & ~StallM;
 
   // Late branch.  Slot 0 is a conditional branch with an operand produced too late, exactly as LateWA2D
@@ -366,28 +377,68 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // redirect uses the Memory-stage path that CSR writes and fences use, and the target misalignment
   // check stays in Execute, so a late branch also needs those and compressed instructions.
   assign LateWA0D = ((Rd2E != 5'b0) & (Rs1D == Rd2E)) ? {2{Slow2E}} :
-                    ((RdE  != 5'b0) & (Rs1D == RdE) & SlowResult0E) ? 2'b10 : 2'b00;
+                    ((RdE  != 5'b0) & (Rs1D == RdE) & Slow0E) ? 2'b10 : 2'b00;
   assign LateWB0D = ((Rd2E != 5'b0) & (Rs2D == Rd2E)) ? {2{Slow2E}} :
-                    ((RdE  != 5'b0) & (Rs2D == RdE) & SlowResult0E) ? 2'b10 : 2'b00;
+                    ((RdE  != 5'b0) & (Rs2D == RdE) & Slow0E) ? 2'b10 : 2'b00;
   assign LateBrD  = (P.ZICSR_SUPPORTED | P.ZIFENCEI_SUPPORTED) & P.ZCA_SUPPORTED &
                     BranchD & (|LateWA0D | |LateWB0D) &
                     ~(Issue2D & (|MemRW2D | LateA2DQ | LateB2DQ | |LateWA2D | |LateWB2D));
   flopenrc #(1) LateBrEReg(clk, reset, FlushE, ~StallE, LateBrD, LateBrE);
 
-  // The late ALU's Writeback operand selects serve slot 1 normally and slot 0's branch when there is one.
-  flopenrc #(4) LateW2EReg(clk, reset, FlushE | (~Issue2D & ~LateBrD) | CaptureE, ~StallE | CaptureE,
-                           LateBrD ? {LateWA0D, LateWB0D} : ({LateWA2D, LateWB2D} & {4{LateOK2D}}),
+  // Late slot 0.  Example:
+  //   bundle A:  lw   a5, 0(a0)
+  //   bundle B:  addi a4, a5, 3     <- slot 0 needs a5, which the previous bundle is still loading
+  // Normally B stalls one cycle in Decode.  Instead B moves on: its Execute ALU result is wrong and
+  // unused, and the late ALU computes a5 + 3 in Memory, when A is in Writeback and a5 is in ResultW.
+  // Slot 0 goes late when all of these hold:
+  //   LateOK0D                   the late ALU implements it (add, sub, logic, shift, slt)
+  //   |LateWA0D | |LateWB0D      an operand is a slow result of the previous bundle (it would stall)
+  //   ~(Issue2D & ...)           slot 1 does not need the late ALU; only one instruction may use it
+  // Otherwise the usual stall applies.  The late result goes only to the Writeback register
+  // (datapath.sv), so a consumer in the next bundle goes late too (Slow0E) or stalls a cycle
+  // (LateStall0D).  Unlike a late branch it redirects nothing, so a slot 1 load or store may sit beside it.
+  // LateOK0D is checked here in Decode on InstrD, the instruction slot 0 really holds.  Fetch's raw bits
+  // are not it for an instruction that spills across a fetch boundary.  InstrD is already decompressed,
+  // so lateok.sv's 32-bit table covers compressed instructions too (c.addi is addi, c.beqz is beq).
+  lateok #(P) lateok0(.Instr(InstrD), .MemRW(2'b00), .IsBranch(1'b0), .Recognized(1'b1), .LateOK(LateOK0D));
+  assign Late0D = LateOK0D & (|LateWA0D | |LateWB0D) &
+                  ~(Issue2D & (LateA2DQ | LateB2DQ | |LateWA2D | |LateWB2D));
+  flopenrc #(1) Late0EReg(clk, reset, FlushE, ~StallE, Late0D, Late0RawE);
+
+  // The late ALU's Writeback operand selects: slot 0's for a late branch or late slot 0, else slot 1's.
+  flopenrc #(4) LateW2EReg(clk, reset, FlushE | (~Issue2D & ~LateBrD & ~Late0D) | CaptureE, ~StallE | CaptureE,
+                           (LateBrD | Late0D) ? {LateWA0D, LateWB0D} : ({LateWA2D, LateWB2D} & {4{LateOK2D}}),
                            {LateWA2RawE, LateWB2RawE});
 
   // Each operand's source for the late ALU: 00 as captured in Execute, 01 slot 0's result in Memory,
   // 10 ResultW, 11 ResultW2.  Slot 0 of the same bundle is the youngest producer, so it wins.  Nothing
   // applies to an operand that is not a register (the ALU takes the PC or an immediate there) or to lui.
   // A late branch's two operands are always registers.
-  assign LateSelA2E = LateBrE ? LateWA2RawE :
+  //
+  // LateSelA2E/LateSelB2E pick each late ALU operand in Memory:
+  //   00 keep the value carried from Execute     10 replace with ResultW  (previous bundle's slot 0)
+  //   01 replace with this bundle's slot 0       11 replace with ResultW2 (previous bundle's slot 1)
+  // At most one instruction per bundle uses the late ALU, and it decides which line applies:
+  //   1. late branch (LateBrE):   slot 0's code from Decode, as is
+  //   2. late slot 0 (Late0RawE): slot 0's code, but 00 if the operand is not a register
+  //   3. otherwise:               slot 1's code (Julia's slot 1 late path, unchanged)
+  // LateWA2RawE/LateWB2RawE hold slot 0's code in cases 1 and 2 and slot 1's in case 3 (LateW2EReg).
+  // "Not a register": ALUSrcAE means operand A is the PC (auipc), ALUSrcBE means operand B is the
+  // immediate (addi), ALUResultSrcE means the result is not the ALU's (lui).  Decode compares raw bit
+  // fields, so e.g. addi a4, a1, 15 has 15 where rs2 would be and looks like it reads x15 (a5).
+  assign LateSelA2E = LateBrE   ? LateWA2RawE :
+                      Late0RawE ? ((ALUSrcAE | ALUResultSrcE) ? 2'b00 : LateWA2RawE) :
                       (ALUSrcA2E | ALUResultSrc2E) ? 2'b00 : LateA2RawE ? 2'b01 : LateWA2RawE;
-  assign LateSelB2E = LateBrE ? LateWB2RawE :
+  assign LateSelB2E = LateBrE   ? LateWB2RawE :
+                      Late0RawE ? ((ALUSrcBE | ALUResultSrcE) ? 2'b00 : LateWB2RawE) :
                       (ALUSrcB2E | ALUResultSrc2E) ? 2'b00 : LateB2RawE ? 2'b01 : LateWB2RawE;
-  assign Late2E     = ~LateBrE & (|LateSelA2E | |LateSelB2E);   // slot 1 itself is late
+
+  // Late0RawE says Decode sent slot 0 to the late ALU; Late0E says an operand is really replaced.
+  // They differ on a false match (the immediate above) or when CaptureE cleared the codes because
+  // Execute already captured the value.  Then nothing is late and slot 0's Execute result is used.
+  // Slot 1 cannot be late in a bundle whose slot 0 was sent to the late ALU.
+  assign Late0E     = Late0RawE & (|LateSelA2E | |LateSelB2E);              // slot 0 is late
+  assign Late2E     = ~LateBrE & ~Late0RawE & (|LateSelA2E | |LateSelB2E);  // slot 1 is late
 
   // In Memory: the branch's real direction from the late ALU's flags, by funct3 as the comparator does.
   flopenrc #(2) LateBrMReg(clk, reset, FlushM, ~StallM, {LateBrE, PCSrcE}, {LateBrM, AssumedTakenM});
@@ -422,9 +473,12 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // four Decode-stage sources are checked, because either slot may be the consumer.
   //
   // In all three of these, a slot 1 consumer the late ALU can execute does not stall: it goes late and
-  // takes the value from ResultW2 (see LateWA2D above).
+  // takes the value from ResultW2 (see LateWA2D above).  A slot 0 consumer that goes late does not
+  // stall either -- a late branch (LateBrD) or a late slot 0 (Late0D).  Example:
+  //   bundle A:  addi t0, t0, 1   | lw a5, 0(a0)
+  //   bundle B:  add  a4, a4, a5  | ...            <- slot 0 goes late and takes a5 from ResultW2
   assign LoadStall2D = MemRW2E[1] & (Rd2E != 5'b0) &
-                       (~LateBrD & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
+                       (~(LateBrD | Late0D) & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
                         (Issue2D & ~LateOK2D & ((Rs1_2D == Rd2E) | (Rs2_2D == Rd2E))));
 
   // Multiply/divide-use, for the same reason: the result is not complete until the end of Memory, so
@@ -433,7 +487,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // cycle.  A divide's iterations happen while DivBusyE holds the whole pipeline, so from the
   // consumer's point of view a divide is no later than a multiply once it leaves Execute.
   assign MDUStall2D = MDUActive2E & (Rd2E != 5'b0) &
-                      (~LateBrD & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
+                      (~(LateBrD | Late0D) & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
                        (Issue2D & ~LateOK2D & ((Rs1_2D == Rd2E) | (Rs2_2D == Rd2E))));
 
   // Late-ALU-use, for the same reason again: a late slot 1 computes its result in Memory, so it first
@@ -441,8 +495,19 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // Forwarding the late ALU's output to Execute instead would chain it into the next bundle's ALU,
   // which is the critical path the late ALU exists to avoid.
   assign LateStall2D = Late2E & (Rd2E != 5'b0) &
-                       (~LateBrD & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
+                       (~(LateBrD | Late0D) & ((Rs1D == Rd2E) | (Rs2D == Rd2E)) |
                         (Issue2D & ~LateOK2D & ((Rs1_2D == Rd2E) | (Rs2_2D == Rd2E))));
+
+  // Late-slot-0-use: the same as LateStall2D, with the previous bundle's slot 0 as the late producer.
+  //   bundle A:  add a4, a4, a5   | ...   <- slot 0 is late (Late0E): a4 is computed in Memory
+  //   bundle B:  lw  a6, 0(a4)    | ...   <- needs a4 in Execute for its address
+  // A's correct a4 first appears in ResultW; IFResultM holds the wrong value from A's Execute ALU.  A
+  // consumer that can go late takes a4 from ResultW and does not stall (Slow0E above).  One that
+  // cannot -- a load or store address, a jalr, a multiply -- waits here one cycle, then forwards it from
+  // Writeback.
+  assign LateStall0D = Late0E & (RdE != 5'b0) &
+                       (~(LateBrD | Late0D) & ((Rs1D == RdE) | (Rs2D == RdE)) |
+                        (Issue2D & ~LateOK2D & ((Rs1_2D == RdE) | (Rs2_2D == RdE))));
 
   // Store-then-load: a structural conflict over the data memory's single SRAM port, not a data
   // dependency, so it ignores registers entirely.  A read is issued in Execute and a write happens in
@@ -459,9 +524,11 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   // were never going to issue together.  The two hazards above need no such gate: they concern the
   // bundle already in Execute, which has issued whatever it issued.  A slot 1 the late ALU can execute
   // takes the slow result from ResultW instead.
-  // A late branch keeps only the store-then-load stall of slot 0's own: its data hazards are what it avoids.
-  assign StructuralStall0GD = LateBrD ? StoreStallD : StructuralStall0D;
-  assign StructuralStallD = StructuralStall0GD | (Issue2D & ~LateOK2D & StructuralStall2D) | LoadStall2D | MDUStall2D | LateStall2D | BundleStoreStallD;
+  // StructuralStall0D is slot 0's own stall from the controller (load-use and the like).  A slot 0 that
+  // goes late -- a late branch or a late slot 0 -- does not need it, since avoiding it is the point; it
+  // keeps only the store-then-load stall, which concerns the memory port, not its operands.
+  assign StructuralStall0GD = (LateBrD | Late0D) ? StoreStallD : StructuralStall0D;
+  assign StructuralStallD = StructuralStall0GD | (Issue2D & ~LateOK2D & StructuralStall2D) | LoadStall2D | MDUStall2D | LateStall2D | LateStall0D | BundleStoreStallD;
 
   datapath #(P) dp(
     .clk, .reset, .ImmSrcD, .InstrD, .Rs1D, .Rs2D, .Rs2E, .StallE, .FlushE, .ForwardAE, .ForwardBE, .W64E, .UW64E, .SubArithE,
@@ -472,7 +539,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .RegWrite2W, .Rd2W,                                                                             // slot 1 write port
     .Mem2E, .ResultSrc2W,                                                                           // slot 1 memory steering
     .Mdu2E, .MDUSrcAE, .MDUSrcBE,                                                                   // slot 1 multiply steering
-    .LateSelA2E, .LateSelB2E, .LateBrE, .LateFlagsM,                                                // late ALU
+    .LateSelA2E, .LateSelB2E, .LateBrE, .Late0RawE, .LateFlagsM,                                                // late ALU
     .Funct3E, .Funct7E, .ALUSrcAE, .ALUSrcBE, .ALUResultSrcE, .ALUSelectE, .JumpE, .BranchSignedE,
     .PCE, .PCLinkE, .FlagsE, .IEUAdrE, .LSUAdrE, .ForwardedSrcAE, .ForwardedSrcBE, .BSelectE, .ZBBSelectE, .BALUControlE, .BMUActiveE, .CZeroE,
     .StallM, .FlushM, .FWriteIntM, .FIntResM, .SrcAM, .WriteDataM, .FCvtIntW,

@@ -259,38 +259,10 @@ module issue import cvw::*;  #(parameter cvw_t P) (
       default:            Slot0EarlyF = 1'b0;
     endcase
 
-  // The late ALU implements add, sub, the logical operations, shifts and set-less-than, with their RV64
-  // W forms -- but no bit-manipulation, crypto or czero.  Those share the OP/OP-IMM opcodes and are
-  // told apart here by funct7 (funct6 for an RV64 shift immediate), so a dependent bitmanip operation
-  // simply does not pair.  An encoding admitted here that turns out illegal is still caught by c2 and
-  // replayed, as for any slot 1.  Every compressed ALU format instrfields recognizes is a base
-  // operation.  LUI and AUIPC read no register: their raw rs fields can match Rd0F only by accident,
-  // so admitting them only removes false dependencies -- ieu.sv clears the late bits for an operand
-  // that is not a register, and they execute in Execute as usual.
-  always_comb
-    if (~&Instr1F[1:0]) Slot1LateOKF = ~|MemRW1F & ~IsBranch1F;
-    else case (Op1F)
-      LUI, AUIPC: Slot1LateOKF = 1'b1;
-      OP_IMM:     case (Funct3_1F)
-                    3'b001:  Slot1LateOKF = (Instr1F[31:26] == 6'b000000);                                    // slli
-                    3'b101:  Slot1LateOKF = (Instr1F[31:26] == 6'b000000) | (Instr1F[31:26] == 6'b010000);   // srli, srai
-                    default: Slot1LateOKF = 1'b1;                                                             // addi, slti(u), xori, ori, andi
-                  endcase
-      OP_IMM_32:  case (Funct3_1F)
-                    3'b000:  Slot1LateOKF = (P.XLEN == 64);                                                   // addiw
-                    3'b001:  Slot1LateOKF = (P.XLEN == 64) & (Funct7_1F == 7'b0000000);                      // slliw
-                    3'b101:  Slot1LateOKF = (P.XLEN == 64) & ((Funct7_1F == 7'b0000000) | (Funct7_1F == 7'b0100000)); // srliw, sraiw
-                    default: Slot1LateOKF = 1'b0;
-                  endcase
-      // add, sll, slt, sltu, xor, srl, or, and at funct7 = 0; sub and sra at 0100000
-      OP:         Slot1LateOKF = (Funct7_1F == 7'b0000000) |
-                                 ((Funct7_1F == 7'b0100000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b101)));
-      // addw, sllw, srlw at funct7 = 0; subw, sraw at 0100000
-      OP_32:      Slot1LateOKF = (P.XLEN == 64) &
-                                 (((Funct7_1F == 7'b0000000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b001) | (Funct3_1F == 3'b101))) |
-                                  ((Funct7_1F == 7'b0100000) & ((Funct3_1F == 3'b000) | (Funct3_1F == 3'b101))));
-      default:    Slot1LateOKF = 1'b0;
-    endcase
+  // Which operations the late ALU implements (lateok.sv).  A dependent bitmanip slot 1 simply does not
+  // pair.  An encoding admitted that turns out illegal is still caught by c2 and replayed, as for any
+  // slot 1.  Slot 0 is checked separately, in Decode (ieu.sv).
+  lateok #(P) lateok1(.Instr(Instr1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .Recognized(Recognized1F), .LateOK(Slot1LateOKF));
 
   // Both slots may write the same register.  Slot 1 is the later instruction, so its value must win
   // everywhere: regfile.sv writes port 6 second, and controller.sv's forwarding prefers slot 1 over slot
