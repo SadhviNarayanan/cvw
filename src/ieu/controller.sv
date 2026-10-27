@@ -544,7 +544,7 @@ module controller import cvw::*;  #(parameter cvw_t P, parameter OTHER_IS_YOUNGE
   // wait a cycle.  Without it, slot 1 would forward a load's address instead of its data.
   // This is computed here rather than in the slot 1 controller because the producer it must be
   // compared against, RdE, belongs to the real pipeline that only this instance has.
-  // No store hazard: slot 1 never accesses memory.
+  // The store-then-load hazard, which slot 1's loads and stores also take part in, is ieu.sv's BundleStoreStallD.
   assign MatchD2E = ((Rs1_2D == RdE) | (Rs2_2D == RdE)) & (RdE != 5'b0);
   assign SlowResultE = (MemReadE | SCE) | CSRReadE | MDUE | FCvtIntE;
   assign StructuralStall2D = SlowResultE & MatchD2E;

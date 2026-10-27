@@ -679,8 +679,8 @@ module testbench;
         // decompressed form must be reported exactly; x0 means no dependency and anything is safe.
         // This also accommodates the HINT encodings, which decompress.sv turns into a nop (see its
         // line 156): instrfields names their registers, the nop touches none.
-        // A branch's [11:7] are immediate bits: c.beqz reports no rd, while its expansion puts offset bits there.
-        if ((dut.core.ifu.Instr2D[6:0] != 7'b1100011) & (dut.core.ifu.Instr2D[11:7] !== 5'b0) & (RdF !== dut.core.ifu.Instr2D[11:7]))
+        // A branch's or store's [11:7] are immediate bits: c.beqz and c.sw report no rd, while their expansions put offset bits there.
+        if (~(dut.core.ifu.Instr2D[6:0] inside {7'b1100011, 7'b0100011}) & (dut.core.ifu.Instr2D[11:7] !== 5'b0) & (RdF !== dut.core.ifu.Instr2D[11:7]))
           $fatal(1, "fieldscheck: Rd under-reported at PC %h: Fetch said x%0d, decompressed writes x%0d (raw %h)",
                  dut.core.ifu.Instr2PCD, RdF, dut.core.ifu.Instr2D[11:7], dut.core.ifu.Instr2RawD);
         // Only compare rs1 for formats that have one.  LUI, AUIPC and JAL are U- and J-type, so
@@ -690,9 +690,9 @@ module testbench;
             & (dut.core.ifu.Instr2D[19:15] !== 5'b0) & (Rs1F !== dut.core.ifu.Instr2D[19:15]))
           $fatal(1, "fieldscheck: Rs1 under-reported at PC %h: Fetch said x%0d, decompressed reads x%0d (raw %h)",
                  dut.core.ifu.Instr2PCD, Rs1F, dut.core.ifu.Instr2D[19:15], dut.core.ifu.Instr2RawD);
-        // Rs2 only exists as a register in the R-type and branch expansions; for an OP-IMM expansion
-        // those bits are immediate, so comparing them would be meaningless.
-        if ((dut.core.ifu.Instr2D[6:0] inside {7'b0110011, 7'b1100011}) & (dut.core.ifu.Instr2D[24:20] !== 5'b0)
+        // Rs2 only exists as a register in the R-type, branch and store expansions; for an OP-IMM
+        // expansion those bits are immediate, so comparing them would be meaningless.
+        if ((dut.core.ifu.Instr2D[6:0] inside {7'b0110011, 7'b1100011, 7'b0100011}) & (dut.core.ifu.Instr2D[24:20] !== 5'b0)
             & (Rs2F !== dut.core.ifu.Instr2D[24:20]))
           $fatal(1, "fieldscheck: Rs2 under-reported at PC %h: Fetch said x%0d, decompressed reads x%0d (raw %h)",
                  dut.core.ifu.Instr2PCD, Rs2F, dut.core.ifu.Instr2D[24:20], dut.core.ifu.Instr2RawD);
@@ -964,10 +964,9 @@ module testbench;
         if (dut.core.Replay2M & ~dut.core.StallM & dut.core.ieu.MemRW2M[0]) Replay2St <= Replay2St + 1;
         if (dut.core.PCSrcE & (|dut.core.ieu.MemRW2E) & ~dut.core.StallE)   BrWithMem2 <= BrWithMem2 + 1;
         // A replayed slot 1 store must never reach memory: the instruction is about to be refetched and
-        // trap, so the handler has to find state unmodified.  Nothing in the design cancels that write
-        // -- FlushW does it for a trap, and a replay withholds FlushW so slot 0 can commit -- so
-        // issue.sv keeps stores out of slot 1 and this must never fire.  It is here to catch anyone
-        // re-admitting them without first building the cancel path described in issue.sv's LOAD arm.
+        // trap, so the handler has to find state unmodified.  A replay withholds FlushW so slot 0 can
+        // commit; the LSU cancels the write itself instead, because the store's own fault drives
+        // LSUFlushW (SelfFaultM in lsu.sv).  This must never fire.
         if (dut.core.Replay2M & dut.core.Mem2M & dut.core.ieu.MemRW2M[0] & ~dut.core.lsu.LSUFlushW) begin
           ReplayStoreLeak <= ReplayStoreLeak + 1;
           $error("replayed slot 1 store was not cancelled at the LSU: the write will reach memory");

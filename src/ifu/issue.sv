@@ -15,11 +15,10 @@
 //
 //          Slot 1 is restricted by the hardware it has, not by legality.  It may hold anything its
 //          own ALU can finish in one cycle -- including the Zb*/Zk*/Zicond encodings, since its
-//          controller has its own bitmanip decoder -- plus one load and one multiply or divide,
-//          because the single load/store unit and the single multiply/divide unit can each be
-//          steered to either slot.  It may hold a conditional branch, which slot 1 resolves with its
-//          own comparator, but no other control transfer and no CSR access.  Stores are excluded for
-//          a reason that is about replay rather than hardware; see the LOAD arm below.
+//          controller has its own bitmanip decoder -- plus one integer load or store and one multiply
+//          or divide, because the single load/store unit and the single multiply/divide unit can each
+//          be steered to either slot.  It may hold a conditional branch, which slot 1 resolves with
+//          its own comparator, but no other control transfer and no CSR access.
 //
 //          Legality is left to the decoder that already knows it.  Where slot 1 turns out to hold an
 //          instruction this configuration does not implement, or one whose memory access faults, the
@@ -67,10 +66,11 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   localparam [6:0] JALR     = 7'b1100111;
   localparam [6:0] SYSTEM   = 7'b1110011;
   localparam [6:0] MISC_MEM = 7'b0001111;
-  // LOAD is still named for the access-width check below.  The other memory opcodes -- STORE, the
-  // floating-point loads and stores, and the atomics -- are no longer listed here: instrfields
-  // reports which slots occupy the load/store unit, for compressed and 32-bit instructions alike.
+  // LOAD and STORE are still named for the access-width checks below.  The other memory opcodes --
+  // the floating-point loads and stores, and the atomics -- are not listed here: instrfields reports
+  // which slots occupy the load/store unit, for compressed and 32-bit instructions alike.
   localparam [6:0] LOAD     = 7'b0000011;
+  localparam [6:0] STORE    = 7'b0100011;
 
   logic [6:0] Op0F, Op1F, Funct7_1F;
   logic [2:0] Funct3_1F;
@@ -200,10 +200,9 @@ module issue import cvw::*;  #(parameter cvw_t P) (
     // today are all single-cycle ALU operations, so recognition and class-legality coincide.  Adding
     // a non-ALU compressed format there for its register fields must come with a separate class
     // signal, or it would silently become pairable here.
-    // A compressed slot 1 is admitted on instrfields' recognition, minus a store.  Stores stay in
-    // slot 0 for the replay reason described in the LOAD arm below -- the same restriction the
-    // 32-bit STORE opcode gets by having no arm at all.  c.beqz and c.bnez pair as branches do.
-    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & ~MemRW1F[0] & (~IsBranch1F | Branch1OKF);
+    // A compressed slot 1 is admitted on instrfields' recognition, which includes c.sw/c.swsp (and
+    // c.sd/c.sdsp on RV64) but not the FP loads and stores.  c.beqz and c.bnez pair as branches do.
+    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & (~IsBranch1F | Branch1OKF);
     else case (Op1F)
       BRANCH:     Slot1CanPairF = Branch1OKF;
       LUI, AUIPC: Slot1CanPairF = 1'b1;
@@ -212,16 +211,13 @@ module issue import cvw::*;  #(parameter cvw_t P) (
       OP_IMM_32:  Slot1CanPairF = (P.XLEN == 64);
       // On OP-32, funct3 001-011 with funct7 = 0000001 is reserved; mulw and the four W divides are not
       OP_32:      Slot1CanPairF = (P.XLEN == 64) & (~MExtF | (MduOKF & ((Funct3_1F == 3'b000) | Funct3_1F[2])));
-      // A load may pair; a store may not, and the reason is replay rather than the load/store unit,
-      // which handles either slot equally well.  A faulting store must leave memory untouched, and the
-      // only thing that cancels a write in this design is FlushW, which a trap supplies.  A replay
-      // withholds FlushW so that slot 0 can still commit, so a replayed slot 1 store would reach memory
-      // and only then trap, leaving a handler to find state already modified.  Cancelling it needs the
-      // write stopped downstream of the MMU -- at CacheRW, after the MMU has decided store-versus-load
-      // page fault from WriteAccessM -- which is a change to the load/store unit that nothing currently
-      // tests, since no test in the suite produces a faulting store in slot 1.  Until that is built and
-      // proven, stores stay in slot 0, where a trap cancels them exactly as it always has.  The cost is
-      // 0.31% of CoreMark cycles; loads are the rest of the benefit.
+      // A load or a store may pair; the load/store unit handles either slot equally well.  A slot 1
+      // access that faults is replayed, which withholds FlushW so that slot 0 can still commit, so for
+      // a store something else must keep the write from reaching memory.  The LSU does it: an access
+      // that raises its own fault drives LSUFlushW (SelfFaultM in lsu.sv), which stops the cache, bus
+      // and DTIM write in the same cycle, before the replay refetches the store to trap alone.  A store
+      // beside a slot 0 branch is safe because ieu.sv never makes that branch a late one: it resolves
+      // in Execute, and Kill2E removes the store before it reaches Memory.
       //
       // Funct3 is checked even though replay would also catch an illegal width: the decoder's LFunctD
       // leaves ControlsD at its illegal default, which carries MemRW = 00, so no access is made either
@@ -231,6 +227,11 @@ module issue import cvw::*;  #(parameter cvw_t P) (
                     3'b011, 3'b110: Slot1CanPairF = (P.XLEN == 64);   // ld, lwu
                     3'b111:         Slot1CanPairF = 1'b0;             // reserved
                     default:        Slot1CanPairF = 1'b1;             // lb, lh, lw, lbu, lhu
+                  endcase
+      STORE:      case (Funct3_1F)
+                    3'b000, 3'b001, 3'b010: Slot1CanPairF = 1'b1;              // sb, sh, sw
+                    3'b011:                 Slot1CanPairF = (P.XLEN == 64);   // sd
+                    default:                Slot1CanPairF = 1'b0;             // reserved
                   endcase
       default:    Slot1CanPairF = 1'b0;
     endcase
@@ -312,7 +313,7 @@ module issue import cvw::*;  #(parameter cvw_t P) (
 
   // The core has one load/store unit, so a bundle may contain at most one memory operation -- but it
   // may sit in either slot, and ieu.sv steers the LSU's inputs to whichever one holds it.  Slot 0's
-  // list is much the wider: slot 1 may only ever hold a LOAD, while slot 0 may also hold a store, a
+  // list is the wider: slot 1 may only hold an integer load or store, while slot 0 may also hold a
   // floating-point load or store, or an atomic, each of which occupies the LSU just the same.
   assign Slot0IsMemF = |MemRW0F;
   assign Slot1IsMemF = |MemRW1F;
