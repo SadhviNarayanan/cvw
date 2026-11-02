@@ -54,7 +54,7 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // Branch and jump outcome
   input  logic              InstrValidD, InstrValidE,
   input  logic              Commit2E,                  // Slot 1 will commit alongside slot 0, so the bundle is two instructions long
-  input  logic              Compressed2E,              // ... and slot 1 is 16 bits, so the bundle ends 2 bytes after it rather than 4
+  input  logic [P.XLEN-1:0] PCLink2E,                  // ... and this is the address just past slot 1, where the bundle then ends
   input  logic              BranchD, BranchE,
   input  logic              JumpD, JumpE,
   input  logic              PCSrcE,                    // Execution stage branch is taken
@@ -167,9 +167,13 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
     .BTBBranchF, .BPCallF, .BPReturnF, .BPJumpF, .BPBranchF, .IClassWrongM, .BPReturnWrongD, .BPReturnD);
 
   // Part 3 RAS
+  // A call pushes the address after itself.  That is the bundle's fall-through, whichever slot holds the
+  // call: a slot 0 call never pairs, so the bundle ends at PCLinkE, and a slot 1 call ends it at PCLink2E.
+  //   0x100 jal ra,f                       pushes 0x104
+  //   0x100 addi a0,a0,1 ; 0x104 jal ra,f   pushes 0x108
   RASPredictor #(P) RASPredictor(.clk, .reset, .StallD, .StallE, .StallM, .FlushD, .FlushE, .FlushM,
     .BPReturnF, .ReturnD, .ReturnE, .CallE,
-    .BPReturnWrongD, .BPReturnD, .RASPCF, .PCLinkE);
+    .BPReturnWrongD, .BPReturnD, .RASPCF, .PCLinkE(PCFallThroughE));
 
   // Check the prediction
   // if it is a CFI then check if the next instruction address (PCD) matches the branch's target or fallthrough address.
@@ -192,12 +196,11 @@ module bpred import cvw::*;  #(parameter cvw_t P) (
   // Execute, which is one instruction past PCLinkE when slot 1 issued alongside slot 0.  Without
   // this, BPWrongE fires on every dual-issue cycle and redirects to slot 1, which has already
   // committed, so it would execute twice.
-  // PCLinkE itself must not change: it is also the address a jal writes to rd and the value the
-  // return-address stack pushes on a call, both of which are slot 0's.
+  // PCLinkE itself must not change: it is also the address a slot 0 jal writes to rd.
   // The bundle is two instructions long only if slot 1 actually commits.  When slot 1 is killed --
   // because slot 0 turned out to be a taken branch -- the fall-through is slot 1's own address, so
   // this comparison against PCD makes BPWrongE fire and redirect there, re-executing it as slot 0.
-  assign PCFallThroughE = Commit2E ? PCLinkE + (Compressed2E ? 'd2 : 'd4) : PCLinkE;
+  assign PCFallThroughE = Commit2E ? PCLink2E : PCLinkE;
   mux2 #(P.XLEN) pccorrectemux(PCFallThroughE, IEUAdrE, PCSrcE, PCCorrectE);
 
   // If the fence/csrw was predicted as a taken branch then we select PCF, rather than PCE.

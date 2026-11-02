@@ -81,9 +81,10 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   output logic              BranchD, BranchE,
   output logic              JumpD, JumpE,
   output logic              Branch2D, Branch2E,               // Slot 1 is a conditional branch (Branch2D before the issue decision)
-  output logic              PCSrc2E,                          // ... that resolved taken
+  output logic              Jump2D, Jump2E,                   // ... or a jal
+  output logic              PCSrc2E,                          // ... that resolved taken (always, for a jal)
   output logic [P.XLEN-1:0] IEUAdr2E,                         // ... to this target
-  output logic [P.XLEN-1:0] IEUResult2M,                      // Slot 1's result in Memory: a slot 1 branch's target
+  input  logic [P.XLEN-1:0] PCLink2E,                         // Slot 1's link address, written by a slot 1 jal
   // Writeback stage signals
   input  logic [P.XLEN-1:0] FIntDivResultW,                   // Integer divide result from FPU (fdivsqrt)
   input  logic [P.XLEN-1:0] CSRReadValW,                      // CSR read value,
@@ -128,7 +129,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] ImmSrc2D;                                       // Slot 1 immediate format
   logic       IllegalBaseInstr2D;                             // Slot 1 is an illegal base instruction
   logic       IllegalBaseInstr2MRaw;                          // ... carried to Memory, before the commit gate
-  logic       Jump2D;                                         // Slot 1 is a jump
   logic       InstrValid2D;                                   // Slot 1 controller valid bit (not yet qualified by the IFU's Instr2ValidD)
   logic       StructuralStall0D;                              // Slot 0's own structural hazards
   logic [1:0] MemRW0D, MemRW0M;                               // Slot 0 memory read/write in Decode / Memory
@@ -150,7 +150,6 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
   logic [2:0] Funct3_2E;                                      // Slot 1 funct3
   logic [6:0] Funct7_2E;                                      // Slot 1 funct7
   logic       W64_2E, UW64_2E, SubArith2E;                    // Slot 1 W-type, .uw-type, subtract/arithmetic-shift
-  logic       Jump2E;                                         // Slot 1 is a jump (always 0 under the issue rules)
   logic [3:0] BSelect2E, ZBBSelect2E;                         // Slot 1 bit-manipulation selects
   logic [2:0] BALUControl2E;                                  // Slot 1 bit-manipulation ALU control
   logic       BMUActive2E;                                    // Slot 1 bit-manipulation instruction active
@@ -245,8 +244,8 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     // An unpaired slot 1 is flushed on its way into Execute rather than being allowed down the
     // pipeline and suppressed at each consumer.  Its control signals, RegWrite2M/W and Rd2M/W then
     // come out as zero on their own, so nothing downstream needs to know about pairing.
-    // Branch2E and PCSrc2E therefore describe a slot 1 that issued.  Slot 0 is never a branch or a
-    // jump beside a slot 1 branch, so a slot 1 branch is never killed by slot 0.
+    // Branch2E, Jump2E and PCSrc2E therefore describe a slot 1 that issued.  Slot 0 is never a branch
+    // or a jump beside a slot 1 branch or jal, so a slot 1 control transfer is never killed by slot 0.
     .StallE, .FlushE(FlushE | ~Issue2D), .FlagsE(Flags2E), .FWriteIntE(1'b0),
     .PCSrcE(PCSrc2E), .ALUSrcAE(ALUSrcA2E), .ALUSrcBE(ALUSrcB2E), .ALUResultSrcE(ALUResultSrc2E), .ALUSelectE(ALUSelect2E),
     .Funct3E(Funct3_2E), .Funct7E(Funct7_2E), .IntDivE(IntDiv2E), .W64E(W64_2E), .UW64E(UW64_2E), .SubArithE(SubArith2E),
@@ -535,7 +534,7 @@ module ieu import cvw::*;  #(parameter cvw_t P) (
     .ImmSrc2D, .Instr2D, .Rs1_2D, .Rs2_2D, .Rs2_2E, .Forward2AE, .Forward2BE,                       // slot 1
     .ALUSrcA2E, .ALUSrcB2E, .ALUResultSrc2E, .ALUSelect2E, .Funct3_2E, .Funct7_2E,                  // slot 1
     .W64_2E, .UW64_2E, .SubArith2E, .BSelect2E, .ZBBSelect2E, .BALUControl2E, .BMUActive2E, .CZero2E, // slot 1
-    .BranchSigned2E, .Flags2E, .IEUAdr2E, .IEUResult2M,                                             // slot 1 branch
+    .BranchSigned2E, .Flags2E, .IEUAdr2E, .Jump2E, .PCLink2E,                                       // slot 1 branch / jal
     .RegWrite2W, .Rd2W,                                                                             // slot 1 write port
     .Mem2E, .ResultSrc2W,                                                                           // slot 1 memory steering
     .Mdu2E, .MDUSrcAE, .MDUSrcBE,                                                                   // slot 1 multiply steering

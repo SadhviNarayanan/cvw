@@ -187,8 +187,8 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   logic                          FCvtIntE;
   logic                          CommittedF;
   logic                          BranchD, BranchE, JumpD, JumpE;
-  logic                          Branch2D, Branch2E, PCSrc2E;     // slot 1 conditional branch, and its outcome
-  logic [P.XLEN-1:0]             IEUAdr2E, IEUResult2M;           // slot 1 branch target in Execute / Memory
+  logic                          Branch2D, Branch2E, Jump2D, Jump2E, PCSrc2E; // slot 1 conditional branch or jal, and its outcome
+  logic [P.XLEN-1:0]             IEUAdr2E, PCLink2E;              // slot 1 branch/jal target, and its link address
   logic                          DCacheStallM, ICacheStallF;
   logic                          WaitM;                           // wfi is waiting for an interrupt
 
@@ -196,7 +196,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
   ifu #(P) ifu(.clk, .reset,
     .StallF, .StallD, .StallE, .StallM, .StallW, .FlushD, .FlushE, .FlushM, .FlushW,
     .InstrValidE, .InstrValidD,
-    .BranchD, .BranchE, .JumpD, .JumpE, .Branch2D, .Branch2E, .PCSrc2E, .IEUAdr2E, .IEUResult2M, .ICacheStallF,
+    .BranchD, .BranchE, .JumpD, .JumpE, .Branch2D, .Branch2E, .Jump2D, .Jump2E, .PCSrc2E, .IEUAdr2E, .PCLink2E, .ICacheStallF,
     // Fetch
     .HRDATA, .PCSpillF, .IFUHADDR,
     .IFUStallF, .IFUHBURST, .IFUHTRANS, .IFUHSIZE, .IFUHREADY, .IFUHWRITE,
@@ -233,7 +233,7 @@ module wallypipelinedcore import cvw::*; #(parameter cvw_t P) (
     .Funct3M, .MemFunct3M,    // funct3 to MDU/FPU; size and signedness to LSU
     .SrcAM,      // to privilege and fpu
     .RdE, .RdM, .FIntResM, .FlushDCacheM,
-    .BranchD, .BranchE, .JumpD, .JumpE, .Branch2D, .Branch2E, .PCSrc2E, .IEUAdr2E, .IEUResult2M,
+    .BranchD, .BranchE, .JumpD, .JumpE, .Branch2D, .Branch2E, .Jump2D, .Jump2E, .PCSrc2E, .IEUAdr2E, .PCLink2E,
     // Writeback stage
     .CSRReadValW, .MDUResultW, .FIntDivResultW, .RdW, .ReadDataW(ReadDataW[P.XLEN-1:0]),
     .InstrValidM, .InstrValidE, .InstrValidD, .FCvtIntResW, .FCvtIntW,

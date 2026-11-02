@@ -44,6 +44,7 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
   output logic [4:0]  Rs1, Rs2,     // Registers read, or x0 if none
   output logic [1:0]  MemRW,        // Uses the load/store unit: [1] reads, [0] writes
   output logic        IsBranch,     // Conditional branch: at most one per bundle, in either slot
+  output logic        IsJal,        // jal, c.j or c.jal: a jump whose target is PC + immediate
   output logic        Recognized    // The fields above are known to be correct for this encoding
 );
 
@@ -75,6 +76,14 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
       default:                MemRW = 2'b00;
     endcase
     IsBranch = (Instr[6:0] == 7'b1100011);
+    // jal reads no register: [19:15] and [24:20] are offset bits.  Reporting them as sources would
+    // only refuse pairs, but a slot 1 jal is common enough (loop back-edges, calls) to be worth exact.
+    //   addi a5,a5,1 ; jal ra,f     jal's [19:15] may happen to be 01111 = a5: still no dependency
+    IsJal = (Instr[6:0] == 7'b1101111);
+    if (IsJal) begin
+      Rs1 = 5'b0;
+      Rs2 = 5'b0;
+    end
 
     if (CompressedI) begin
       // Default for compressed: nothing decoded, so refuse to pair.  Each arm below replaces this.
@@ -83,6 +92,7 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
       Rs2 = 5'b0;
       MemRW = 2'b00;
       IsBranch = 1'b0;
+      IsJal = 1'b0;
       Recognized = 1'b0;
 
       if (P.ZCA_SUPPORTED)
@@ -194,9 +204,19 @@ module instrfields import cvw::*;  #(parameter cvw_t P) (
               if (Instr[11:7] == 5'd2) Rs1 = 5'd2;                // c.addi16sp reads sp
               Recognized = 1'b1;                                  // otherwise c.lui, no source
             end
-          // Compressed jumps are deliberately left unrecognized.  c.j, c.jal, c.jr and c.ret must
-          // block pairing in either slot -- the instruction after a jump is not the next one
-          // executed -- and leaving them out of the table achieves exactly that.
+          // c.j and c.jal, exactly as a 32-bit jal: they read nothing, and IsJal tells issue.sv to keep
+          // them out of slot 0 and admit them to slot 1 only under its jump rules.
+          //   c.j   = jal x0, offset   writes nothing
+          //   c.jal = jal ra, offset   writes ra; RV32 only -- on RV64 this key is c.addiw
+          5'b01_101: begin                                        // c.j
+            IsJal = 1'b1; Recognized = 1'b1;
+          end
+          5'b01_001: if (P.XLEN == 32) begin                      // c.jal
+            Rd = 5'd1;
+            IsJal = 1'b1; Recognized = 1'b1;
+          end
+          // c.jr and c.jalr (c.ret) are left unrecognized: their target is a register, which slot 1 has
+          // no way to predict or train, so they never pair in either slot.
           default: ;   // every other compressed encoding stays unrecognized
         endcase
     end

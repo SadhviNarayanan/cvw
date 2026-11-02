@@ -51,9 +51,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   input  logic              BMUActive2E,             // Slot 1: bit-manipulation instruction active
   input  logic [1:0]        CZero2E,                 // Slot 1: czero.* active
   input  logic              BranchSigned2E,          // Slot 1: branch comparison is signed
+  input  logic              Jump2E,                  // Slot 1: jal, whose result is its link address
+  input  logic [P.XLEN-1:0] PCLink2E,                // Slot 1: its link address, the PC just past it
   output logic [1:0]        Flags2E,                 // Slot 1: comparison flags ({eq, lt})
-  output logic [P.XLEN-1:0] IEUAdr2E,                // Slot 1: ALU sum, which is its branch target
-  output logic [P.XLEN-1:0] IEUResult2M,             // Slot 1: result in Memory; a branch target for a slot 1 branch
+  output logic [P.XLEN-1:0] IEUAdr2E,                // Slot 1: ALU sum, which is its branch or jal target
   input  logic              RegWrite2W,              // Slot 1: commits a register write this cycle
   input  logic [4:0]        Rd2W,                    // Slot 1: destination register in Writeback
   input  logic              Mem2E,                   // Slot 1: holds the bundle's memory operation
@@ -115,8 +116,10 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   logic [P.XLEN-1:0] ForwardedSrc2AE, ForwardedSrc2BE; // Slot 1: operands after forwarding
   logic [P.XLEN-1:0] SrcA2E, SrcB2E;                 // Slot 1: ALU inputs
   logic [P.XLEN-1:0] ALUResult2E;                    // Slot 1: ALU output.  The sum, IEUAdr2E, needs no bit-0
-                                                     //   mask as slot 0's does, because slot 1 cannot jump.
+                                                     //   mask as slot 0's does: that is for jalr, and slot 1
+                                                     //   only ever jumps with jal, whose target is even.
   logic [P.XLEN-1:0] AltResult2E, IEUResult2E;       // Slot 1: result in Execute
+  logic [P.XLEN-1:0] IEUResult2M;                    // Slot 1: result in Memory
   logic [P.XLEN-1:0] IEUResult2W;                    // Slot 1: result in Writeback
   logic [P.XLEN-1:0] ResultW2;                       // Slot 1: value written back
   logic [P.XLEN-1:0] SrcA2M, SrcB2M;                 // Slot 1: ALU inputs, carried to the late ALU
@@ -211,10 +214,11 @@ module datapath import cvw::*;  #(parameter cvw_t P) (
   mux2  #(P.XLEN)  srcbmux2(ForwardedSrc2BE, ImmExt2E, ALUSrcB2E, SrcB2E);
   alu   #(P)       alu2(SrcA2E, SrcB2E, W64_2E, UW64_2E, SubArith2E, ALUSelect2E, BSelect2E, ZBBSelect2E,
                         Funct3_2E, Funct7_2E, Rs2_2E, BALUControl2E, BMUActive2E, CZero2E, ALUResult2E, IEUAdr2E);
-  // Slot 0's altresultmux also selects PCLinkE as a jump's link value.  Slot 1 may branch but cannot
-  // jump under the issue rules, and its link value would be PCLinkE + 4 rather than PCLinkE, so that input is left
-  // out rather than wired to a value that is wrong but currently unreachable.
-  assign AltResult2E = ImmExt2E;                     // lui writes its immediate straight through
+  // Slot 1's result when it is not the ALU's, as slot 0's altresultmux: lui writes its immediate, a jal
+  // its link address.  Slot 1's link is one instruction past slot 1, so it is PCLink2E (ifu.sv), not
+  // slot 0's PCLinkE.  The jal's target is its ALU sum, IEUAdr2E, which goes to the IFU.
+  //   0x100 addi a0,a0,1 ; 0x104 jal ra,f     ra = 0x108   (0x106 if the jal is a c.jal)
+  mux2  #(P.XLEN)  altresultmux2(ImmExt2E, PCLink2E, Jump2E, AltResult2E);
   mux2  #(P.XLEN)  ieuresultmux2(ALUResult2E, AltResult2E, ALUResultSrc2E, IEUResult2E);
 
   // The address handed to the load/store unit, selected from whichever slot holds the bundle's one

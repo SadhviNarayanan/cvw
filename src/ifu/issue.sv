@@ -18,7 +18,8 @@
 //          controller has its own bitmanip decoder -- plus one integer load or store and one multiply
 //          or divide, because the single load/store unit and the single multiply/divide unit can each
 //          be steered to either slot.  It may hold a conditional branch, which slot 1 resolves with
-//          its own comparator, but no other control transfer and no CSR access.
+//          its own comparator, or a jal (also c.j, c.jal), whose target its own ALU computes, but no
+//          jalr and no CSR access.
 //
 //          Legality is left to the decoder that already knows it.  Where slot 1 turns out to hold an
 //          instruction this configuration does not implement, or one whose memory access faults, the
@@ -90,7 +91,8 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   logic       MduOKF;                     // Slot 1's multiply or divide may pair
   logic       Slot0ReadsFPF;              // Slot 0 reads floating-point registers
   logic       Slot0IsMduF, Slot1IsMduF, OneMduOpF;
-  logic       Branch1OKF;                 // A conditional branch in slot 1 may pair
+  logic       Branch1OKF;                 // A conditional branch or a jal in slot 1 may pair
+  logic       IsJal0F, IsJal1F;           // Each slot is a jal, c.j or c.jal
 
   assign Op0F      = Instr0F[6:0];
   assign Op1F      = Instr1F[6:0];
@@ -103,8 +105,8 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   // Slot 0's sources are not connected: only what it writes can create a hazard with slot 1.  A
   // write-after-read cannot arise, because slot 0 read its operands in Decode and slot 1 does not
   // write until Writeback, and the two move together through the pipeline.
-  instrfields #(P) fields0(.Instr(Instr0F), .Rd(Rd0F), .Rs1(), .Rs2(), .MemRW(MemRW0F), .IsBranch(IsBranch0F), .Recognized(Recognized0F));
-  instrfields #(P) fields1(.Instr(Instr1F), .Rd(Rd1F), .Rs1(Rs1_1F), .Rs2(Rs2_1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .Recognized(Recognized1F));
+  instrfields #(P) fields0(.Instr(Instr0F), .Rd(Rd0F), .Rs1(), .Rs2(), .MemRW(MemRW0F), .IsBranch(IsBranch0F), .IsJal(IsJal0F), .Recognized(Recognized0F));
+  instrfields #(P) fields1(.Instr(Instr1F), .Rd(Rd1F), .Rs1(Rs1_1F), .Rs2(Rs2_1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .IsJal(IsJal1F), .Recognized(Recognized1F));
 
   // A slot is admitted only if its register fields are known.  For a 32-bit instruction that is
   // always true, so this reduces to the previous behaviour; for a compressed one it is instrfields'
@@ -128,13 +130,17 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   //     on to the target.  Whatever the BTB said, Execute checks the bundle's next PC against the
   //     resolved one, so a prediction attributed to the wrong slot costs a misprediction, never
   //     correctness.
-  //   jal/jalr: never pair.  The instruction after an unconditional jump is never the next one
-  //     executed, and BPJumpF forces BPPCSrcF high for them anyway.
+  //     A jal in slot 1 is the same case: the BTB entry at the bundle's address is slot 1's jump.
+  //       0x100 addi a0,a0,1   slot 0
+  //       0x104 j    loop      slot 1     BTB[0x100] = jump to loop, so BPPCSrcF is high -- and it pairs
+  //   jal/jalr in slot 0: never pair.  The instruction after an unconditional jump is never the next
+  //     one executed, and BPJumpF forces BPPCSrcF high for them anyway.  ~IsJal0F also covers c.j and
+  //     c.jal, which instrfields recognizes; c.jr and c.jalr it does not, so they never pair.
   //   SYSTEM: mret and sret redirect the PC from the Memory stage without flushing Writeback, so a
   //     slot 1 sharing that stage would commit after the return had already been taken.  This one
   //     cannot be fixed by killing slot 1 later -- it is already past the point of no return.
   //   MISC_MEM: fence.i flushes the pipeline behind it.
-  assign Slot0CanPairF = (~BPPCSrcF | IsBranch1F) & (Op0F != JAL) & (Op0F != JALR) &
+  assign Slot0CanPairF = (~BPPCSrcF | IsBranch1F | IsJal1F) & ~IsJal0F & (Op0F != JALR) &
                          (Op0F != SYSTEM) & (Op0F != MISC_MEM);
 
   // What slot 1 may hold is a statement about hardware, not about legality.  Slot 1 has its own full
@@ -192,6 +198,14 @@ module issue import cvw::*;  #(parameter cvw_t P) (
   //     beside a busy divider; this keeps it that way.  A multiply never holds Execute, so it pairs.
   //   compressed instructions are supported.  Then a branch target is never misaligned; without
   //     them it can be, and the fault would belong to slot 1, which has no trap identity.
+  // A jal (or c.j, c.jal) in slot 1 follows the same rules: the predictor sees it exactly as it sees
+  // a slot 1 branch that is always taken -- one control transfer per bundle, looked up and trained at
+  // the bundle's address -- and the first time it is seen it redirects from Execute like a mispredicted
+  // branch.  It may sit beside a slot 0 load or store: its target reaches the BTB in Memory on its own
+  // register (IEUAdr2M in ifu.sv), not on the load/store unit's address.
+  //   addi a0,a0,1 ; j loop       pairs
+  //   sw   a0,0(a1); jal ra,f     pairs
+  //   beqz a0,out  ; j loop       does not: two control transfers
   assign Branch1OKF = P.ZCA_SUPPORTED & ~IsBranch0F & ~(Slot0IsMduF & Instr0F[14]) & ~Slot0ReadsFPF;
 
   always_comb
@@ -201,10 +215,16 @@ module issue import cvw::*;  #(parameter cvw_t P) (
     // a non-ALU compressed format there for its register fields must come with a separate class
     // signal, or it would silently become pairable here.
     // A compressed slot 1 is admitted on instrfields' recognition, which includes c.sw/c.swsp (and
-    // c.sd/c.sdsp on RV64) but not the FP loads and stores.  c.beqz and c.bnez pair as branches do.
-    if (~&Instr1F[1:0]) Slot1CanPairF = Recognized1F & (~IsBranch1F | Branch1OKF);
-    else case (Op1F)
-      BRANCH:     Slot1CanPairF = Branch1OKF;
+    // c.sd/c.sdsp on RV64) but not the FP loads and stores.  c.beqz, c.bnez, c.j and c.jal follow the
+    // same control-transfer rule as their 32-bit forms below (IsBranch1F and IsJal1F are only ever set
+    // for an encoding instrfields recognized).
+    //   addi a5,a5,1 ; c.j loop     pairs: Branch1OKF is 1
+    //   beqz a4,out  ; c.j loop     does not: two control transfers in one bundle
+    if (~&Instr1F[1:0]) begin
+      if (IsBranch1F | IsJal1F) Slot1CanPairF = Branch1OKF;     // c.beqz, c.bnez, c.j, c.jal
+      else                      Slot1CanPairF = Recognized1F;   // everything else instrfields decodes
+    end else case (Op1F)
+      BRANCH, JAL: Slot1CanPairF = Branch1OKF;
       LUI, AUIPC: Slot1CanPairF = 1'b1;
       OP_IMM:     Slot1CanPairF = 1'b1;
       OP:         Slot1CanPairF = ~MExtF | MduOKF;
@@ -261,8 +281,9 @@ module issue import cvw::*;  #(parameter cvw_t P) (
 
   // Which operations the late ALU implements (lateok.sv).  A dependent bitmanip slot 1 simply does not
   // pair.  An encoding admitted that turns out illegal is still caught by c2 and replayed, as for any
-  // slot 1.  Slot 0 is checked separately, in Decode (ieu.sv).
-  lateok #(P) lateok1(.Instr(Instr1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F), .Recognized(Recognized1F), .LateOK(Slot1LateOKF));
+  // slot 1.  Slot 0 is checked separately, in Decode (ieu.sv).  A compressed jump is kept out the same
+  // way as a compressed branch: instrfields recognizes it, but it is not an ALU operation.
+  lateok #(P) lateok1(.Instr(Instr1F), .MemRW(MemRW1F), .IsBranch(IsBranch1F | IsJal1F), .Recognized(Recognized1F), .LateOK(Slot1LateOKF));
 
   // Both slots may write the same register.  Slot 1 is the later instruction, so its value must win
   // everywhere: regfile.sv writes port 6 second, and controller.sv's forwarding prefers slot 1 over slot
